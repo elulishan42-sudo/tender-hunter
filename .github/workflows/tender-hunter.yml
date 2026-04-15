@@ -29,4 +29,6 @@ jobs:
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
           MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
           MERKATO_PASSWORD: ${{ secrets.MERKATO_PASSWORD }}
+          TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
+          TENDERFLOW_USER_ID: ${{ secrets.TENDERFLOW_USER_ID }}
         run: node .opencode/scripts/tender-scraper.js
