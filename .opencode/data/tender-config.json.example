@@ -1,0 +1,16 @@
+{
+  "telegram": {
+    "botToken": "YOUR_TELEGRAM_BOT_TOKEN",
+    "userId": "YOUR_TELEGRAM_USER_ID"
+  },
+  "merkato": {
+    "email": "your@email.com",
+    "password": "your-password"
+  },
+  "filters": {
+    "freshness": "new",
+    "cost": "all",
+    "deadline": "any",
+    "status": "open"
+  }
+}

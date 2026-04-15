@@ -1,0 +1,7 @@
+MOODLE LMS — FULL CATEGORY & COURSE STRUCTURE,,,,,,,,,
+CATEGORY,,,SUB-CATEGORY,,,COURSE,,,
+Category Name,Category ID,Category Description,Sub-Category Name,Sub-Category ID,Sub-Cat Description,Course Name,Short Name,Course ID,Course Description
+Workplace Readiness,CAT-READY,"Foundation training for anyone entering the workforce: how to find work, behave professionally, stay safe, and manage your money.",Career Preparation,SCAT-READY-CAR,"Skills for finding, applying for, and succeeding in your first professional role.",Job Search & Career Readiness,JOB-READY,CRS-WR-001,"Write a strong CV, prepare for interviews, build a professional network, and present yourself as a confident, job-ready candidate."
+,,,,,,Workplace Etiquette & Professionalism,WORK-ETIQ,CRS-WR-002,"Learn the unwritten rules of professional workplaces: punctuality, dress code, email etiquette, office behaviour, and building a professional reputation."
+,,,Workplace Safety,SCAT-READY-SAFE,"Essential health and safety knowledge for construction, manufacturing, service, and office environments.",Health & Safety at Work,SAFE-WORK,CRS-WR-003,"Learn hazard identification, risk assessment, PPE, fire safety, and first aid basics required for safe workplaces."
+,,,Financial Independence,SCAT-READY-FIN,Personal money management skills for young professionals starting their earning journey.,Personal Finance & Money Management,PERS-FIN,CRS-WR-004,"Learn to budget your salary, save consistently, avoid debt traps, and plan for your financial future from your very first paycheck."
