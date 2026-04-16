@@ -12,10 +12,9 @@ const path = require('path');
 const CONFIG_FILE = path.join(__dirname, '../data/tender-config.json');
 const CACHE_FILE = path.join(__dirname, '../data/tender-cache.json');
 
-// TenderFlow API
-const TENDERFLOW_API = 'https://tenderflow.vercel.app/api/agent/ingest-tenders';
+// TenderFlow API — user is identified by the Bearer token, no separate user_id needed
+const TENDERFLOW_API = 'https://tender-flow-v2.vercel.app/api/agent/ingest-tenders';
 const TENDERFLOW_API_KEY = process.env.TENDERFLOW_API_KEY || '';
-const TENDERFLOW_USER_ID = process.env.TENDERFLOW_USER_ID || '';
 
 const DEFAULT_FILTERS = { freshness: 'new', cost: 'all', deadline: 'any', status: 'open' };
 
@@ -419,7 +418,6 @@ async function sendToTenderFlow(tenders) {
 
   for (const batch of batches) {
     const payload = {
-      user_id: TENDERFLOW_USER_ID,
       tenders: batch.map(t => ({
         tender_name: t.title,
         publishing_entity: t.publishingEntity || 'Unknown',
@@ -445,7 +443,31 @@ async function sendToTenderFlow(tenders) {
         body: JSON.stringify(payload)
       });
 
+      // Handle non-JSON responses (HTML error pages, 404s, etc.)
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await res.text();
+        console.log(`  TenderFlow error: HTTP ${res.status} — returned non-JSON (${contentType || 'no content-type'})`);
+        console.log(`  Response preview: ${text.substring(0, 200)}`);
+        continue;
+      }
+
+      if (res.status === 401) {
+        console.error('  TenderFlow: 401 Unauthorized — API key is wrong or missing. Aborting.');
+        return { success: false, created: totalCreated, skipped: totalSkipped };
+      }
+
+      if (res.status === 429) {
+        console.log('  TenderFlow: 429 Rate limited — daily limit reached. Stopping.');
+        break;
+      }
+
       const result = await res.json();
+
+      if (res.status === 400) {
+        console.log(`  TenderFlow: 400 Bad request — ${result.error || JSON.stringify(result)}`);
+        continue;
+      }
 
       if (result.created !== undefined) {
         totalCreated += result.created || 0;

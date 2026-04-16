@@ -39,7 +39,6 @@ jobs:
           MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
           MERKATO_PASSWORD: ${{ secrets.MERKATO_PASSWORD }}
           TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
-          TENDERFLOW_USER_ID: ${{ secrets.TENDERFLOW_USER_ID }}
         run: node .opencode/scripts/tender-scraper.js
 
       # Save cache after scraping so the next run can dedup
