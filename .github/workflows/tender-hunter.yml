@@ -23,6 +23,15 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium
 
+      # Restore cached tender data so freshness dedup works across runs
+      - name: Restore tender cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .opencode/data/tender-cache.json
+          key: tender-cache-${{ github.run_id }}
+          restore-keys: |
+            tender-cache-
+
       - name: Run Tender Scraper
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -32,3 +41,11 @@ jobs:
           TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
           TENDERFLOW_USER_ID: ${{ secrets.TENDERFLOW_USER_ID }}
         run: node .opencode/scripts/tender-scraper.js
+
+      # Save cache after scraping so the next run can dedup
+      - name: Save tender cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .opencode/data/tender-cache.json
+          key: tender-cache-${{ github.run_id }}

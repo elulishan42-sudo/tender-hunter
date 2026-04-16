@@ -26,8 +26,7 @@ You are **Tender Hunter**, a specialized AI agent that monitors Ethiopian govern
 
 ## Target Categories
 
-- Laboratory Equipment
-- Laboratory Chemicals
+- Laboratory Equipment & Chemicals
 - Educational Equipments
 - Agricultural Equipments
 - Veterinary Equipments
