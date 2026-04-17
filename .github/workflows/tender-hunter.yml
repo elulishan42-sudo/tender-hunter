@@ -1,0 +1,31 @@
+name: Tender Hunter
+on:
+  schedule:
+    - cron: '0 6 * * *' # Run daily at 6AM UTC (9AM Ethiopia time)
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          
+      - name: Install dependencies
+        run: cd .opencode && npm ci
+        
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+        
+      - name: Run scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
+          MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
+          MERKATO_PASSWORD: ${{ secrets.MERKATO_PASSWORD }}
+          TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
+        run: node .opencode/scripts/tender-scraper.js
