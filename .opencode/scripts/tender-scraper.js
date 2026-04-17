@@ -402,15 +402,29 @@ async function sendToTenderFlow(tenders) {
     return { success: false, created: 0, skipped: 0 };
   }
 
-  if (tenders.length === 0) {
-    console.log('No new tenders to send to TenderFlow');
+  // Filter out tenders with past deadlines before sending
+  const now = new Date();
+  const validTenders = tenders.filter(t => {
+    if (!t.deadline) return true; // will get default 30 days
+    try {
+      const deadline = new Date(t.deadline);
+      return !isNaN(deadline) && deadline > now;
+    } catch (e) {
+      return true;
+    }
+  });
+
+  console.log(`  Filtered out ${tenders.length - validTenders.length} tenders with past deadlines`);
+
+  if (validTenders.length === 0) {
+    console.log('No valid new tenders to send to TenderFlow');
     return { success: true, created: 0, skipped: 0 };
   }
 
   // Batch into groups of 50
   const batches = [];
-  for (let i = 0; i < tenders.length; i += 50) {
-    batches.push(tenders.slice(i, i + 50));
+  for (let i = 0; i < validTenders.length; i += 50) {
+    batches.push(validTenders.slice(i, i + 50));
   }
 
   let totalCreated = 0;
