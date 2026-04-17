@@ -519,7 +519,12 @@ function formatDigest(tenders) {
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   if (tenders.length === 0) {
-    return `📋 TENDER DIGEST\n━━━━━━━━━━━━━━━━━\n📅 ${today}\n\n✅ No new tenders found.\n\nSent to TenderFlow ✓`;
+    return `🔔 NEW TENDERS (0)\n━━━━━━━━━━━━━━━
+
+✅ No new tenders found today.
+
+━━━━━━━━━━━━━━━
+✅ Data sent to TenderFlow`;
   }
 
   // Group by TenderFlow category
@@ -532,28 +537,40 @@ function formatDigest(tenders) {
   const MAX_TENDERS = 12;
   const overflow = Math.max(0, tenders.length - MAX_TENDERS);
 
-  let msg = `📋 TENDER DIGEST\n━━━━━━━━━━━━━━━━━\n📅 ${today}\n📊 ${tenders.length} new tender(s)\n\n`;
+  // TEMPLATE 2: Compact & Minimal
+  let msg = `🔔 NEW TENDERS (${tenders.length})\n━━━━━━━━━━━━━━━`;
 
   let count = 0;
   for (const [cat, catTenders] of Object.entries(byCategory)) {
     if (count >= MAX_TENDERS) break;
-    msg += `📁 *${escapeTelegramMarkdown(cat)}:*\n`;
+    // Map category names to emoji prefixes
+    const categoryEmoji = {
+      'Lab & Chemicals': '🔬',
+      'Educational Equipment': '📚',
+      'Agricultural Equipment': '🌾',
+      'Veterinary Equipment': '🐄',
+      'Medical Equipment': '🏥'
+    }[cat] || '📋';
+
+    msg += `\n\n${categoryEmoji} ${cat}\n`;
     for (const t of catTenders.slice(0, 3)) {
       if (++count > MAX_TENDERS) break;
-      const title = escapeTelegramMarkdown(t.title.substring(0, 55));
-      msg += `  • ${title}${t.title.length > 55 ? '...' : ''}\n`;
+      const title = escapeTelegramMarkdown(t.title.substring(0, 50));
+      msg += `• ${title}${t.title.length > 50 ? '...' : ''}\n`;
       if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
-        msg += `    🏢 ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 40))}\n`;
+        msg += `  ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 35))}\n`;
       }
-      msg += `    🔗 ${t.url}\n\n`;
+      // Shorten URL for mobile readability
+      const shortUrl = t.url.replace('https://tender.2merkato.com/', '');
+      msg += `  🔗 ${shortUrl}\n`;
     }
   }
 
   if (overflow > 0) {
-    msg += `⚠️ +${overflow} more → TenderFlow dashboard\n`;
+    msg += `\n⚠️ +${overflow} more tenders available in dashboard`;
   }
 
-  msg += `━━━━━━━━━━━━━━━━━\n✅ Sent to TenderFlow`;
+  msg += `\n━━━━━━━━━━━━━━━\n✅ Data sent to TenderFlow`;
   return msg;
 }
 
