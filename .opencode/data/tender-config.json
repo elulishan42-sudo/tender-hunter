@@ -13,5 +13,9 @@
     "deadline": "any",
     "status": "open"
   },
+  "tenderflow": {
+    "enabled": true,
+    "endpoint": "https://tenderflow.vercel.app/api/agent/ingest-tenders"
+  },
   "createdAt": "2026-04-15"
 }
