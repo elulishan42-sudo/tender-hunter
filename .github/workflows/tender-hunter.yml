@@ -19,7 +19,7 @@ jobs:
         run: cd .opencode && npm ci
         
       - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
+        run: cd .opencode && npx playwright install chromium --with-deps
         
       - name: Run scraper
         env:
