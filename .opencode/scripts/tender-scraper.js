@@ -647,64 +647,103 @@ function escapeTelegramMarkdown(text) {
   return text.replace(/([*_`\[\]])/g, '\\$1');
 }
 
+const CATEGORY_EMOJI = {
+  'Lab & Chemicals': '🔬',
+  'Education & Stationery': '📚',
+  'Vet & Agri': '🌾',
+  'Medical': '🏥',
+  'Electronics & IT': '💻',
+  'Car & Auto': '🚗',
+  'Cleaning & Janitorial': '🧹',
+  'Food & Institutional': '🍽',
+  'General': '📋',
+  'Other': '📋',
+};
+
 function formatDigest(tenders) {
-  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 
   if (tenders.length === 0) {
-    return `🔔 NEW TENDERS (0)\n━━━━━━━━━━━━━━━
+    return `📋 TENDER DIGEST — ${today}
+━━━━━━━━━━━━━━━━━━━━
 
-✅ No new tenders found today.
+No new tenders found today.
 
-━━━━━━━━━━━━━━━
-✅ Data sent to TenderFlow`;
+━━━━━━━━━━━━━━━━━━━━
+✅ Sent to TenderFlow`;
   }
 
-  // Group by TenderFlow category
+  // Sort by soonest deadline first; tenders without valid future deadlines go last.
+  const now = new Date();
+  const nowMs = now.getTime();
+  const sortable = tenders.map(t => {
+    const ms = t.deadline ? new Date(t.deadline).getTime() : NaN;
+    return { t, ms, valid: !isNaN(ms) && ms >= nowMs };
+  });
+  sortable.sort((a, b) => {
+    if (a.valid !== b.valid) return a.valid ? -1 : 1;
+    return a.ms - b.ms;
+  });
+
+  // Cap at 15 to stay comfortably under Telegram's 4096-char message limit
+  // given the richer per-tender block.
+  const MAX_TENDERS = 15;
+  const visible = sortable.slice(0, MAX_TENDERS).map(s => s.t);
+  const overflow = tenders.length - visible.length;
+
+  // Group visible tenders by category (sort is stable, so within-category order
+  // is still soonest-deadline-first).
   const byCategory = {};
-  tenders.forEach(t => {
+  visible.forEach(t => {
     if (!byCategory[t.category]) byCategory[t.category] = [];
     byCategory[t.category].push(t);
   });
 
-  const MAX_TENDERS = 12;
-  const overflow = Math.max(0, tenders.length - MAX_TENDERS);
+  const categoryCount = Object.keys(byCategory).length;
 
-  // TEMPLATE 2: Compact & Minimal
-  let msg = `🔔 NEW TENDERS (${tenders.length})\n━━━━━━━━━━━━━━━`;
+  let msg = `📋 TENDER DIGEST — ${today}\n`;
+  msg += `${tenders.length} new tender${tenders.length === 1 ? '' : 's'}`;
+  msg += ` · ${categoryCount} categor${categoryCount === 1 ? 'y' : 'ies'}`;
+  msg += `\n━━━━━━━━━━━━━━━━━━━━`;
 
-  let count = 0;
   for (const [cat, catTenders] of Object.entries(byCategory)) {
-    if (count >= MAX_TENDERS) break;
-    // Map category names to emoji prefixes
-    const categoryEmoji = {
-      'Lab & Chemicals': '🔬',
-      'Educational Equipment': '📚',
-      'Agricultural Equipment': '🌾',
-      'Veterinary Equipment': '🐄',
-      'Medical Equipment': '🏥'
-    }[cat] || '📋';
+    const emoji = CATEGORY_EMOJI[cat] || '📋';
+    msg += `\n\n${emoji} *${cat}* (${catTenders.length})`;
 
-    msg += `\n\n${categoryEmoji} ${cat}\n`;
-    for (const t of catTenders.slice(0, 3)) {
-      if (++count > MAX_TENDERS) break;
-      const title = escapeTelegramMarkdown(t.title.substring(0, 50));
-      msg += `• ${title}${t.title.length > 50 ? '...' : ''}\n`;
+    for (const t of catTenders) {
+      const rawTitle = (t.title || 'Untitled').substring(0, 80);
+      const title = escapeTelegramMarkdown(rawTitle) + ((t.title || '').length > 80 ? '…' : '');
+      msg += `\n\n▸ [${title}](${t.url})`;
+
       if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
-        msg += `  ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 35))}\n`;
+        msg += `\n  ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 50))}`;
       }
-      // Shorten URL for mobile readability
-      const shortUrl = t.url
-        .replace('https://tender.2merkato.com/', '2merkato/')
-        .replace('https://production.egp.gov.et/egp/', 'egp/');
-      msg += `  🔗 ${shortUrl}\n`;
+
+      if (t.deadline) {
+        const deadline = new Date(t.deadline);
+        if (!isNaN(deadline)) {
+          const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
+          const dateStr = deadline.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          let label;
+          if (daysLeft < 0) label = `closed ${Math.abs(daysLeft)}d ago`;
+          else if (daysLeft === 0) label = 'closes today';
+          else if (daysLeft === 1) label = 'closes tomorrow';
+          else label = `${daysLeft} days left`;
+          msg += `\n  📅 ${label} · ${dateStr}`;
+        }
+      }
+
+      const typeLabel = t.tenderType === 'import' ? '🌐 Import' : '🏠 Local';
+      const portal = t.sourcePortal || '2merkato';
+      msg += `\n  🏷 ${typeLabel} · ${portal}`;
     }
   }
 
+  msg += `\n\n━━━━━━━━━━━━━━━━━━━━`;
   if (overflow > 0) {
-    msg += `\n⚠️ +${overflow} more tenders available in dashboard`;
+    msg += `\n+${overflow} more in dashboard`;
   }
-
-  msg += `\n━━━━━━━━━━━━━━━\n✅ Data sent to TenderFlow`;
+  msg += `\n✅ Sent to TenderFlow`;
   return msg;
 }
 
