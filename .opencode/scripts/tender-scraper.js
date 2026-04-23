@@ -38,6 +38,27 @@ const CATEGORY_MAP = {
   'Medical Equipments': 'Medical',
 };
 
+// EGP (production.egp.gov.et) — their taxonomy is Goods/Works/Services/Consultancy,
+// which doesn't map to TenderFlow's category enum. Keyword-match against lot text
+// into the same 4 target categories we already pull from 2Merkato. Unmatched bids
+// are dropped so we stay on-target and within the 200/day API budget.
+const EGP_API = 'https://production.egp.gov.et/po-gw/cms-v2/api/sourcing/get-grouped-sourcing';
+const EGP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const EGP_CATEGORY_KEYWORDS = {
+  'Lab & Chemicals':        ['laborator', 'chemical', 'reagent', 'scientific', 'microscope', 'analyzer', 'spectro'],
+  'Medical':                ['medical', 'medicine', 'hospital', 'pharmaceutic', 'surgical', 'clinic', 'dental', 'drug', 'health'],
+  'Vet & Agri':             ['agricultur', 'veterinary', 'livestock', 'seed', 'fertilizer', 'irrigation', 'farm', 'animal', 'crop', 'tractor'],
+  'Education & Stationery': ['school', 'educational', 'university', 'textbook', 'stationery', 'classroom', 'teach'],
+};
+
+function matchEgpCategory(text) {
+  const lower = (text || '').toLowerCase();
+  for (const [category, keywords] of Object.entries(EGP_CATEGORY_KEYWORDS)) {
+    if (keywords.some(k => lower.includes(k))) return category;
+  }
+  return null;
+}
+
 let config = {
   telegram: { botToken: '', userId: '' },
   merkato: { email: '', password: '' },
@@ -352,6 +373,7 @@ async function scrapeCategory(browser, categoryId, categoryName) {
           sourceCategory: categoryName,
           tenderType: details.tenderType || 'local',
           notes: details.notes || '',
+          sourcePortal: '2merkato',
         });
 
         // Rate limit between detail page requests
@@ -367,6 +389,71 @@ async function scrapeCategory(browser, categoryId, categoryName) {
     await page.close();
   }
 
+  return tenders;
+}
+
+async function scrapeEgp() {
+  // Pull the newest bids across all sectors, then keyword-filter into our 4 target
+  // categories. `top=100` is a sensible default — enough to catch daily inflow
+  // (at ~571 total open bids, newest 100 spans a few days) without over-fetching.
+  const url = `${EGP_API}?type=all&skip=0&top=100&locale=en&orderBy=invitationDate%20desc`;
+  console.log('Fetching EGP listings...');
+
+  let data;
+  try {
+    const res = await fetchWithRetry(url, {
+      headers: { 'User-Agent': EGP_USER_AGENT, 'Accept': 'application/json' },
+    });
+    if (!res.ok) {
+      console.log(`  EGP fetch failed: HTTP ${res.status}`);
+      return [];
+    }
+    data = await res.json();
+  } catch (e) {
+    console.log(`  EGP fetch error: ${e.message}`);
+    return [];
+  }
+
+  const now = new Date();
+  const MAX_FUTURE_MS = 2 * 365 * 24 * 60 * 60 * 1000; // skip obvious data-entry typos (e.g. year 2125)
+  const tenders = [];
+  let droppedPastDeadline = 0;
+  let droppedFarFuture = 0;
+  let droppedOffCategory = 0;
+
+  for (const item of data.items || []) {
+    for (const bid of item.result || []) {
+      if (!bid.submissionDeadline) { droppedPastDeadline++; continue; }
+      const deadline = new Date(bid.submissionDeadline);
+      if (isNaN(deadline) || deadline <= now) { droppedPastDeadline++; continue; }
+      if (deadline - now > MAX_FUTURE_MS) { droppedFarFuture++; continue; }
+
+      const text = `${bid.lotName || ''} ${bid.lotDescription || ''}`;
+      const category = matchEgpCategory(text);
+      if (!category) { droppedOffCategory++; continue; }
+
+      const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
+      const sourceApp = (bid.sourceApplication || 'purchasing').toLowerCase();
+
+      tenders.push({
+        tenderId: `egp-${bid.id}`,
+        url: `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${bid.id}/open`,
+        title: (bid.lotName || bid.lotDescription || 'Untitled').substring(0, 200).trim(),
+        tenderNumber: (bid.lotReferenceNo || bid.procurementReferenceNo || '').trim(),
+        publishingEntity: (bid.procuringEntity || 'Unknown').trim(),
+        deadline: deadline.toISOString(),
+        daysLeft,
+        isFree: true,
+        category,
+        sourceCategory: bid.procurementCategory || '',
+        tenderType: bid.marketPlace === 'International' ? 'import' : 'local',
+        notes: (bid.lotDescription || '').substring(0, 200).trim(),
+        sourcePortal: 'egp',
+      });
+    }
+  }
+
+  console.log(`  EGP: ${tenders.length} matched (dropped: ${droppedOffCategory} off-category, ${droppedPastDeadline} past, ${droppedFarFuture} far-future) out of ${data.total ?? '?'} total`);
   return tenders;
 }
 
@@ -483,7 +570,7 @@ async function sendToTenderFlow(tenders) {
         deadline: t.deadline || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         tender_number: t.tenderNumber || undefined,
         source_link: t.url,
-        source_portal: '2merkato',
+        source_portal: t.sourcePortal || '2merkato',
         category: t.category,
         tender_type: t.tenderType,
         bid_type: 'Open',
@@ -606,7 +693,9 @@ function formatDigest(tenders) {
         msg += `  ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 35))}\n`;
       }
       // Shorten URL for mobile readability
-      const shortUrl = t.url.replace('https://tender.2merkato.com/', '');
+      const shortUrl = t.url
+        .replace('https://tender.2merkato.com/', '2merkato/')
+        .replace('https://production.egp.gov.et/egp/', 'egp/');
       msg += `  🔗 ${shortUrl}\n`;
     }
   }
@@ -644,12 +733,23 @@ async function main() {
   const filters = loadConfig();
   const cache = loadCache();
 
-  console.log('Scraping 2Merkato...');
-  const allTenders = await scrapeTenders();
-  console.log(`Total scraped: ${allTenders.length}`);
+  console.log('Scraping 2Merkato + EGP in parallel...');
+  const [merkatoTenders, egpTenders] = await Promise.all([
+    scrapeTenders().catch(e => {
+      console.error(`2Merkato failed: ${e.message}`);
+      return [];
+    }),
+    scrapeEgp().catch(e => {
+      console.error(`EGP failed: ${e.message}`);
+      return [];
+    }),
+  ]);
+
+  const allTenders = [...merkatoTenders, ...egpTenders];
+  console.log(`Total scraped: 2Merkato=${merkatoTenders.length} + EGP=${egpTenders.length} = ${allTenders.length}`);
 
   if (allTenders.length === 0) {
-    console.error('Scraping returned 0 tenders — possible login or site issue');
+    console.error('Both sources returned 0 tenders — possible auth or site issue');
     return false;
   }
 
