@@ -8,6 +8,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const CONFIG_FILE = path.join(__dirname, '../data/tender-config.json');
 const CACHE_FILE = path.join(__dirname, '../data/tender-cache.json');
@@ -83,6 +84,20 @@ function loadConfig() {
   return DEFAULT_FILTERS;
 }
 
+// Mirrors TenderFlow's server-side dedup algorithm (AGENT_API_CONTRACT.md §Deduplication):
+// sha256(lowercase(tender_name) + lowercase(publishing_entity) + deadline_date).
+// If TenderFlow changes its algorithm, update this to match — otherwise dedup will drift
+// and we'll waste API quota on tenders the server would have skipped anyway.
+function computeFingerprint(tender) {
+  const name = (tender.title || '').toLowerCase();
+  const entity = (tender.publishingEntity || '').toLowerCase();
+  if (!tender.deadline) return null;
+  const d = new Date(tender.deadline);
+  if (isNaN(d)) return null;
+  const dateStr = d.toISOString().split('T')[0];
+  return crypto.createHash('sha256').update(name + entity + dateStr).digest('hex');
+}
+
 function loadCache() {
   try {
     if (fs.existsSync(CACHE_FILE)) return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
@@ -108,6 +123,17 @@ async function fetchWithRetry(url, options, retries = 2) {
   }
 }
 
+// Block resources we don't need for text scraping — big walltime win on every navigation
+async function blockResources(page) {
+  await page.route('**/*', (route) => {
+    const type = route.request().resourceType();
+    if (type === 'image' || type === 'font' || type === 'media') {
+      return route.abort();
+    }
+    route.continue();
+  });
+}
+
 async function login(page) {
   if (!config.merkato.email || !config.merkato.password) {
     console.log('No login credentials');
@@ -123,7 +149,7 @@ async function login(page) {
     await page.fill('input[type="password"]', config.merkato.password);
     await page.click('button[type="submit"]');
     await page.waitForURL('**/tenders**', { timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(500);
 
     if (!page.url().includes('/login')) {
       console.log('✅ Logged in');
@@ -139,7 +165,8 @@ async function login(page) {
 async function getTenderDetails(page, tenderUrl) {
   try {
     await page.goto(tenderUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    // Wait until Vue has actually rendered substantive content instead of a fixed 3s
+    await page.waitForFunction(() => document.body.innerText.length > 500, { timeout: 5000 }).catch(() => {});
 
     const details = await page.evaluate(() => {
       const text = document.body.innerText;
@@ -230,7 +257,9 @@ async function getTenderDetails(page, tenderUrl) {
 // Collect all card data from a listing page BEFORE navigating away
 async function scrapeListingPage(page, url) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(5000);
+  // Wait for the actual tender cards to render instead of a fixed 5s
+  await page.waitForSelector('a[href*="/tenders/"]', { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(500);
 
   return page.evaluate(() => {
     const results = [];
@@ -271,6 +300,7 @@ async function scrapeListingPage(page, url) {
 
 async function scrapeCategory(browser, categoryId, categoryName) {
   const page = await browser.newPage();
+  await blockResources(page);
   const tenders = [];
   const maxTendersPerCategory = 10;
 
@@ -325,7 +355,7 @@ async function scrapeCategory(browser, categoryId, categoryName) {
         });
 
         // Rate limit between detail page requests
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(200);
       }
     }
 
@@ -353,6 +383,7 @@ async function scrapeTenders() {
   try {
     // Login on a dedicated page, then close it (cookies persist in the browser context)
     const loginPage = await browser.newPage();
+    await blockResources(loginPage);
     const loggedIn = await login(loginPage);
     await loginPage.close();
 
@@ -361,9 +392,18 @@ async function scrapeTenders() {
       return [];
     }
 
-    for (const [catName, catId] of Object.entries(CATEGORY_IDS)) {
-      const tenders = await scrapeCategory(browser, catId, catName);
-      // Deduplicate across categories within a single run
+    // Scrape all categories in parallel — they share the browser context (and login cookies)
+    const categoryResults = await Promise.all(
+      Object.entries(CATEGORY_IDS).map(([catName, catId]) =>
+        scrapeCategory(browser, catId, catName).catch(e => {
+          console.log(`Category ${catName} failed: ${e.message}`);
+          return [];
+        })
+      )
+    );
+
+    // Deduplicate across categories within a single run
+    for (const tenders of categoryResults) {
       for (const t of tenders) {
         if (!seenIds.has(t.tenderId)) {
           seenIds.add(t.tenderId);
@@ -383,9 +423,14 @@ async function scrapeTenders() {
 
 function filterTenders(tenders, filters, cache) {
   const cachedIds = new Set(cache.tenders.map(t => t.tenderId));
+  const cachedFingerprints = new Set(cache.tenders.map(t => t.fingerprint).filter(Boolean));
 
   return tenders.filter(t => {
-    if (filters.freshness === 'new' && cachedIds.has(t.tenderId)) return false;
+    if (filters.freshness === 'new') {
+      if (cachedIds.has(t.tenderId)) return false;
+      const fp = computeFingerprint(t);
+      if (fp && cachedFingerprints.has(fp)) return false;
+    }
     if (filters.cost === 'free' && !t.isFree) return false;
     // daysLeft is null when unknown — don't filter out tenders with unknown deadlines
     if (filters.status === 'open' && t.daysLeft !== null && t.daysLeft <= 0) return false;
@@ -624,9 +669,10 @@ async function main() {
     return false;
   }
 
-  // Update cache
+  // Update cache — attach fingerprints so future runs dedup even if 2Merkato changes the URL/ID
+  const filteredWithFingerprint = filtered.map(t => ({ ...t, fingerprint: computeFingerprint(t) }));
   saveCache({
-    tenders: [...cache.tenders, ...filtered].slice(-100),
+    tenders: [...cache.tenders, ...filteredWithFingerprint].slice(-2000),
     lastRun: new Date().toISOString()
   });
 
