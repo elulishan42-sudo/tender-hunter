@@ -29,3 +29,4 @@ jobs:
           name: egp-recon-${{ github.run_id }}
           path: .data/
           retention-days: 7
+          include-hidden-files: true
