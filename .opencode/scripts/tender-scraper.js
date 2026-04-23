@@ -323,7 +323,7 @@ async function scrapeCategory(browser, categoryId, categoryName) {
   const page = await browser.newPage();
   await blockResources(page);
   const tenders = [];
-  const maxTendersPerCategory = 10;
+  const maxTendersPerCategory = 20;
 
   try {
     console.log(`Scraping ${categoryName}...`);
