@@ -168,8 +168,10 @@ async function login(page) {
 async function getTenderDetails(page, tenderUrl) {
   try {
     await page.goto(tenderUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    // Wait until Vue has actually rendered substantive content instead of a fixed 3s
-    await page.waitForFunction(() => document.body.innerText.length > 500, { timeout: 5000 }).catch(() => {});
+    // Wait until Vue has actually rendered substantive content. 2s is enough for
+    // most pages; the ones that don't make it are likely broken anyway and we
+    // proceed with whatever's loaded — the catch hides the timeout.
+    await page.waitForFunction(() => document.body.innerText.length > 500, { timeout: 2000 }).catch(() => {});
 
     const details = await page.evaluate(() => {
       const text = document.body.innerText;
@@ -346,11 +348,12 @@ function buildMerkatoTender(card, details) {
   };
 }
 
-async function scrapeMerkato() {
+async function scrapeMerkato(cache) {
   const MAX_TOTAL = 1000;
   const MAX_PAGES = 80;             // 80 pages × ~15 cards = up to ~1200 candidates
   const LISTING_CONCURRENCY = 4;    // parallel listing-page workers
-  const DETAIL_CONCURRENCY = 5;     // parallel detail-page workers
+  const DETAIL_CONCURRENCY = 10;    // parallel detail-page workers
+  const cachedIds = new Set((cache?.tenders || []).map(t => t.tenderId));
 
   const browser = await chromium.launch({
     headless: true,
@@ -420,15 +423,25 @@ async function scrapeMerkato() {
     await Promise.all(listingPages.map(p => fetchListing(p)));
     console.log(`  Collected ${allCards.length} cards across listing`);
 
+    // Pre-filter: cards already in the cache would be dropped by filterTenders
+    // anyway. Skipping their detail fetch is the single biggest win in steady
+    // state — only truly new cards pay the navigation cost.
     const targetCards = allCards.slice(0, MAX_TOTAL);
+    const newCards = targetCards.filter(c => !cachedIds.has(c.tenderId));
+    const skipped = targetCards.length - newCards.length;
+    if (skipped > 0) {
+      console.log(`  ${skipped} already cached; fetching details for ${newCards.length} new (concurrency ${DETAIL_CONCURRENCY})`);
+    } else {
+      console.log(`  Fetching details for ${newCards.length} (concurrency ${DETAIL_CONCURRENCY})`);
+    }
 
     // Phase 2: parallel detail fetches via worker pool. Failed details still
     // produce a tender with listing-only data — never silently lose one.
     let detailCursor = 0;
     const fetchDetail = async (page) => {
-      while (detailCursor < targetCards.length) {
+      while (detailCursor < newCards.length) {
         const i = detailCursor++;
-        const card = targetCards[i];
+        const card = newCards[i];
         try {
           const details = await getTenderDetails(page, card.url);
           tenders.push(buildMerkatoTender(card, details));
@@ -440,7 +453,6 @@ async function scrapeMerkato() {
       }
     };
 
-    console.log(`  Fetching details for ${targetCards.length} (concurrency ${DETAIL_CONCURRENCY})`);
     await Promise.all(detailPages.map(p => fetchDetail(p)));
 
     console.log(`  2Merkato: got ${tenders.length} tenders`);
@@ -819,7 +831,7 @@ async function main() {
 
   console.log('Scraping 2Merkato + EGP in parallel...');
   const [merkatoTenders, egpTenders] = await Promise.all([
-    scrapeMerkato().catch(e => {
+    scrapeMerkato(cache).catch(e => {
       console.error(`2Merkato failed: ${e.message}`);
       return [];
     }),
