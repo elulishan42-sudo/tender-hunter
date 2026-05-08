@@ -34,16 +34,14 @@ Both scrapers run under `Promise.all`. Either failing is caught and logged; we o
 
 ## Sources
 
-| Source   | Access          | How                                                                                 |
-| -------- | --------------- | ----------------------------------------------------------------------------------- |
-| 2Merkato | Login required  | Playwright renders the Vue SPA, iterates 5 category IDs, visits each detail page    |
-| EGP      | Public JSON API | Single GET `/po-gw/cms-v2/api/sourcing/get-grouped-sourcing?top=100` — no browser   |
+| Source   | Access          | How                                                                                                                            |
+| -------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 2Merkato | Login required  | Playwright walks the unfiltered tender feed; parallel listing pagination + parallel detail fetch (4 listing + 5 detail workers) |
+| EGP      | Public JSON API | Paginated GET `/po-gw/cms-v2/api/sourcing/get-grouped-sourcing` — fetches every open bid                                       |
 
 ### Categories
 
-2Merkato's own taxonomy maps cleanly to TenderFlow's enum (see `CATEGORY_MAP` in [tender-scraper.js](.opencode/scripts/tender-scraper.js)).
-
-EGP classifies bids only as `Goods / Works / Services`, which is too broad. We keyword-match on `lotName + lotDescription` into four buckets: `Lab & Chemicals`, `Medical`, `Vet & Agri`, `Education & Stationery`. Anything unmatched is dropped. The keyword dict (`EGP_CATEGORY_KEYWORDS`) is the single tuning knob.
+Both sources share the same `CATEGORY_KEYWORDS` dict in [tender-scraper.js](.opencode/scripts/tender-scraper.js). We keyword-match `title + description` into TenderFlow's category enum; tenders that match nothing fall through as `General` rather than being dropped — **recall over precision**. Expanding the keyword dict improves classification accuracy but never affects whether a tender is captured.
 
 ## Deduplication
 
@@ -106,11 +104,13 @@ Environment variables take precedence over the config file, matching the CI flow
 
 | Want to...                                | Edit                                                                 |
 | ----------------------------------------- | -------------------------------------------------------------------- |
-| Add EGP keywords                          | `EGP_CATEGORY_KEYWORDS` in [tender-scraper.js](.opencode/scripts/tender-scraper.js) (lowercase, partial matches OK) |
-| Change 2Merkato target categories         | `CATEGORY_IDS` + `CATEGORY_MAP`                                      |
-| Tenders per 2Merkato category per run     | `maxTendersPerCategory` in `scrapeCategory()` (default 10)           |
-| How many EGP bids to consider per run     | `top=100` in `scrapeEgp()`'s URL                                     |
-| Cache retention                           | `slice(-2000)` in the `saveCache` call inside `main()`               |
+| Improve category classification           | `CATEGORY_KEYWORDS` in [tender-scraper.js](.opencode/scripts/tender-scraper.js) (lowercase, partial matches OK) |
+| 2Merkato max tenders per run              | `MAX_TOTAL` in `scrapeMerkato()` (default 1000)                      |
+| 2Merkato pagination depth                 | `MAX_PAGES` in `scrapeMerkato()` (default 80)                        |
+| 2Merkato listing concurrency              | `LISTING_CONCURRENCY` in `scrapeMerkato()` (default 4)               |
+| 2Merkato detail concurrency               | `DETAIL_CONCURRENCY` in `scrapeMerkato()` (default 5)                |
+| EGP pagination cap                        | `MAX_PAGES` in `scrapeEgp()` (default 50, ~5000 bids)                |
+| Cache retention                           | `slice(-5000)` in the `saveCache` call inside `main()`               |
 | Daily run time                            | Cron expression in [tender-hunter.yml](.github/workflows/tender-hunter.yml) |
 
 ## File map
