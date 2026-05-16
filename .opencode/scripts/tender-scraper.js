@@ -565,10 +565,15 @@ async function scrapeEgp() {
 
     const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
     const sourceApp = (bid.sourceApplication || 'purchasing').toLowerCase();
+    // The detail page URL takes sourceId, NOT id. Using bid.id causes the SPA
+    // to hang on a spinner because /get-quotation-invitation/{bid.id} returns
+    // 204 No Content while /get-quotation-invitation/{bid.sourceId} returns
+    // the actual record. Keep tenderId on bid.id for cache continuity.
+    const urlId = bid.sourceId || bid.id;
 
     tenders.push({
       tenderId: `egp-${bid.id}`,
-      url: `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${bid.id}/open`,
+      url: `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`,
       title: (bid.lotName || bid.lotDescription || 'Untitled').substring(0, 200).trim(),
       tenderNumber: (bid.lotReferenceNo || bid.procurementReferenceNo || '').trim(),
       publishingEntity: (bid.procuringEntity || 'Unknown').trim(),
