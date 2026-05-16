@@ -45,6 +45,25 @@ function matchCategory(text) {
   return null;
 }
 
+// User-excluded categories — applied to both sources. EGP also has a structured
+// procurementCategory field we can use; 2Merkato we have to keyword-match on title.
+// Word-boundary regex so "buildings" doesn't match "build", etc.
+const EXCLUDED_PROCUREMENT_CATEGORIES = new Set(['Services', 'Consultancy', 'Works']);
+const EXCLUDE_PATTERNS = [
+  /\bconsultanc(y|ies)\b/i,
+  /\bconsultan(t|ts)\b/i,
+  /\bconsulting\b/i,
+  /\bconstruction\b/i,
+  /\brenovation\b/i,
+  /\brehabilitation\b/i,
+  /\bcivil works?\b/i,
+  /\bservices?\b/i,
+];
+
+function isExcluded(text) {
+  return EXCLUDE_PATTERNS.some(p => p.test(text || ''));
+}
+
 let config = {
   telegram: { botToken: '', userId: '' },
   merkato: { email: '', password: '' },
@@ -423,17 +442,23 @@ async function scrapeMerkato(cache) {
     await Promise.all(listingPages.map(p => fetchListing(p)));
     console.log(`  Collected ${allCards.length} cards across listing`);
 
+    // User-excluded: drop construction/services/consultancy cards based on title.
+    // Done before the cache-pre-filter so excluded tenders never enter the cache.
+    const targetCards = allCards.slice(0, MAX_TOTAL);
+    const allowedCards = targetCards.filter(c => !isExcluded(c.title));
+    const excludedCount = targetCards.length - allowedCards.length;
+
     // Pre-filter: cards already in the cache would be dropped by filterTenders
     // anyway. Skipping their detail fetch is the single biggest win in steady
     // state — only truly new cards pay the navigation cost.
-    const targetCards = allCards.slice(0, MAX_TOTAL);
-    const newCards = targetCards.filter(c => !cachedIds.has(c.tenderId));
-    const skipped = targetCards.length - newCards.length;
-    if (skipped > 0) {
-      console.log(`  ${skipped} already cached; fetching details for ${newCards.length} new (concurrency ${DETAIL_CONCURRENCY})`);
-    } else {
-      console.log(`  Fetching details for ${newCards.length} (concurrency ${DETAIL_CONCURRENCY})`);
-    }
+    const newCards = allowedCards.filter(c => !cachedIds.has(c.tenderId));
+    const cachedSkipped = allowedCards.length - newCards.length;
+
+    const parts = [];
+    if (excludedCount > 0) parts.push(`${excludedCount} excluded by keyword`);
+    if (cachedSkipped > 0) parts.push(`${cachedSkipped} already cached`);
+    const prefix = parts.length ? `  ${parts.join('; ')}; ` : '  ';
+    console.log(`${prefix}fetching details for ${newCards.length} new (concurrency ${DETAIL_CONCURRENCY})`);
 
     // Phase 2: parallel detail fetches via worker pool. Failed details still
     // produce a tender with listing-only data — never silently lose one.
@@ -520,6 +545,7 @@ async function scrapeEgp() {
   const tenders = [];
   let droppedPastDeadline = 0;
   let droppedFarFuture = 0;
+  let droppedExcluded = 0;
   let mappedToGeneral = 0;
 
   for (const bid of allBids) {
@@ -528,7 +554,11 @@ async function scrapeEgp() {
     if (isNaN(deadline) || deadline <= now) { droppedPastDeadline++; continue; }
     if (deadline - now > MAX_FUTURE_MS) { droppedFarFuture++; continue; }
 
+    // User-excluded: Services, Consultancy, Construction
+    if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
     const text = `${bid.lotName || ''} ${bid.lotDescription || ''}`;
+    if (isExcluded(text)) { droppedExcluded++; continue; }
+
     const matched = matchCategory(text);
     const category = matched || 'General';
     if (!matched) mappedToGeneral++;
@@ -553,7 +583,7 @@ async function scrapeEgp() {
     });
   }
 
-  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedPastDeadline} past, ${droppedFarFuture} far-future)`);
+  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedPastDeadline} past, ${droppedFarFuture} far-future)`);
   return tenders;
 }
 
