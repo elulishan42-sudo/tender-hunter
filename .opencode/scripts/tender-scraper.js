@@ -565,15 +565,21 @@ async function scrapeEgp() {
 
     const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
     const sourceApp = (bid.sourceApplication || 'purchasing').toLowerCase();
-    // The detail page URL takes sourceId, NOT id. Using bid.id causes the SPA
-    // to hang on a spinner because /get-quotation-invitation/{bid.id} returns
-    // 204 No Content while /get-quotation-invitation/{bid.sourceId} returns
-    // the actual record. Keep tenderId on bid.id for cache continuity.
+    // Purchasing bids load via /purchasing-quotation-invitations/api/get-quotation-invitation,
+    // which is public and accepts bid.sourceId (NOT bid.id — that returns 204 No Content).
+    // Tendering / Auctioning / Prequalification all route to /tender-administrations/tender-by-id
+    // and equivalents that return 401 Unauthorized for anonymous calls; deep-linking via
+    // those URLs hangs even for logged-in users because the SPA's auth context is
+    // bootstrapped on a different navigation path. Send them to the listing page where
+    // they can search by the tender_number we already include.
     const urlId = bid.sourceId || bid.id;
+    const sourceLink = sourceApp === 'purchasing'
+      ? `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`
+      : 'https://production.egp.gov.et/egp/bids/all';
 
     tenders.push({
       tenderId: `egp-${bid.id}`,
-      url: `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`,
+      url: sourceLink,
       title: (bid.lotName || bid.lotDescription || 'Untitled').substring(0, 200).trim(),
       tenderNumber: (bid.lotReferenceNo || bid.procurementReferenceNo || '').trim(),
       publishingEntity: (bid.procuringEntity || 'Unknown').trim(),
