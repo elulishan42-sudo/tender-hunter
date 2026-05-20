@@ -66,6 +66,19 @@ function isExcluded(text) {
   return EXCLUDE_PATTERNS.some(p => p.test(text || ''));
 }
 
+// Deadline window: tenders must close in (now + 2d, now + 30d) AND within
+// the current calendar year. Applied to both sources so they stay consistent.
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+function isDeadlineInWindow(deadlineLike, now) {
+  if (!deadlineLike) return false;
+  const d = deadlineLike instanceof Date ? deadlineLike : new Date(deadlineLike);
+  if (isNaN(d)) return false;
+  const days = (d - now) / ONE_DAY_MS;
+  if (days <= 2 || days >= 30) return false;
+  if (d.getFullYear() !== now.getFullYear()) return false;
+  return true;
+}
+
 let config = {
   telegram: { botToken: '', userId: '' },
   merkato: { email: '', password: '' },
@@ -446,20 +459,31 @@ async function scrapeMerkato(cache) {
     await Promise.all(listingPages.map(p => fetchListing(p)));
     console.log(`  Collected ${allCards.length} cards across listing`);
 
+    const now = new Date();
+
     // User-excluded: drop construction/services/consultancy cards based on title.
     // Done before the cache-pre-filter so excluded tenders never enter the cache.
     const targetCards = allCards.slice(0, MAX_TOTAL);
     const allowedCards = targetCards.filter(c => !isExcluded(c.title));
     const excludedCount = targetCards.length - allowedCards.length;
 
+    // Deadline window pre-filter using card.daysLeft (parsed from listing text).
+    // Cards with unknown daysLeft are deferred to the post-detail check.
+    const windowCards = allowedCards.filter(c => {
+      if (c.daysLeft == null) return true;
+      return c.daysLeft > 2 && c.daysLeft < 30;
+    });
+    const outOfWindowByCard = allowedCards.length - windowCards.length;
+
     // Pre-filter: cards already in the cache would be dropped by filterTenders
     // anyway. Skipping their detail fetch is the single biggest win in steady
     // state — only truly new cards pay the navigation cost.
-    const newCards = allowedCards.filter(c => !cachedIds.has(c.tenderId));
-    const cachedSkipped = allowedCards.length - newCards.length;
+    const newCards = windowCards.filter(c => !cachedIds.has(c.tenderId));
+    const cachedSkipped = windowCards.length - newCards.length;
 
     const parts = [];
     if (excludedCount > 0) parts.push(`${excludedCount} excluded by keyword`);
+    if (outOfWindowByCard > 0) parts.push(`${outOfWindowByCard} out-of-window by daysLeft`);
     if (cachedSkipped > 0) parts.push(`${cachedSkipped} already cached`);
     const prefix = parts.length ? `  ${parts.join('; ')}; ` : '  ';
     console.log(`${prefix}fetching details for ${newCards.length} new (concurrency ${DETAIL_CONCURRENCY})`);
@@ -467,16 +491,24 @@ async function scrapeMerkato(cache) {
     // Phase 2: parallel detail fetches via worker pool. Failed details still
     // produce a tender with listing-only data — never silently lose one.
     let detailCursor = 0;
+    let droppedPostDetail = 0;
     const fetchDetail = async (page) => {
       while (detailCursor < newCards.length) {
         const i = detailCursor++;
         const card = newCards[i];
+        let t;
         try {
           const details = await getTenderDetails(page, card.url);
-          tenders.push(buildMerkatoTender(card, details));
+          t = buildMerkatoTender(card, details);
         } catch (e) {
           console.log(`  Detail fetch failed for ${card.tenderId}: ${e.message}`);
-          tenders.push(buildMerkatoTender(card, null));
+          t = buildMerkatoTender(card, null);
+        }
+        // Strict window check using the precise deadline now available
+        if (isDeadlineInWindow(t.deadline, now)) {
+          tenders.push(t);
+        } else {
+          droppedPostDetail++;
         }
         await page.waitForTimeout(150);
       }
@@ -484,7 +516,8 @@ async function scrapeMerkato(cache) {
 
     await Promise.all(detailPages.map(p => fetchDetail(p)));
 
-    console.log(`  2Merkato: got ${tenders.length} tenders`);
+    const droppedSuffix = droppedPostDetail > 0 ? ` (dropped ${droppedPostDetail} out-of-window after detail)` : '';
+    console.log(`  2Merkato: got ${tenders.length} tenders${droppedSuffix}`);
 
     await Promise.all([...listingPages, ...detailPages].map(p => p.close().catch(() => {})));
 
@@ -546,17 +579,14 @@ async function scrapeEgp() {
 
   const now = new Date();
   const tenders = [];
-  let droppedPastDeadline = 0;
+  let droppedOutOfWindow = 0;
   let droppedExcluded = 0;
   let mappedToGeneral = 0;
 
   for (const bid of allBids) {
-    if (!bid.submissionDeadline) { droppedPastDeadline++; continue; }
+    // Deadline must be 2 < daysLeft < 30 AND in the current year.
+    if (!isDeadlineInWindow(bid.submissionDeadline, now)) { droppedOutOfWindow++; continue; }
     const deadline = new Date(bid.submissionDeadline);
-    if (isNaN(deadline) || deadline <= now) { droppedPastDeadline++; continue; }
-    // No upper bound on how far in the future the deadline can be — even bids
-    // with obvious data-entry typos (e.g. year 2125) are ingested so the user
-    // can decide; matching 2Merkato's behavior.
 
     // User-excluded: Services, Consultancy, Construction
     if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
@@ -598,7 +628,7 @@ async function scrapeEgp() {
     });
   }
 
-  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedPastDeadline} past)`);
+  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window)`);
   return tenders;
 }
 
