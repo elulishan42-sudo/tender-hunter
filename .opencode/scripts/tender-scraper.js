@@ -545,10 +545,8 @@ async function scrapeEgp() {
   console.log(`  EGP: fetched ${allBids.length} of ${total ?? '?'} bids across ${pages} page(s)`);
 
   const now = new Date();
-  const MAX_FUTURE_MS = 2 * 365 * 24 * 60 * 60 * 1000;
   const tenders = [];
   let droppedPastDeadline = 0;
-  let droppedFarFuture = 0;
   let droppedExcluded = 0;
   let mappedToGeneral = 0;
 
@@ -556,7 +554,9 @@ async function scrapeEgp() {
     if (!bid.submissionDeadline) { droppedPastDeadline++; continue; }
     const deadline = new Date(bid.submissionDeadline);
     if (isNaN(deadline) || deadline <= now) { droppedPastDeadline++; continue; }
-    if (deadline - now > MAX_FUTURE_MS) { droppedFarFuture++; continue; }
+    // No upper bound on how far in the future the deadline can be — even bids
+    // with obvious data-entry typos (e.g. year 2125) are ingested so the user
+    // can decide; matching 2Merkato's behavior.
 
     // User-excluded: Services, Consultancy, Construction
     if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
@@ -598,7 +598,7 @@ async function scrapeEgp() {
     });
   }
 
-  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedPastDeadline} past, ${droppedFarFuture} far-future)`);
+  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedPastDeadline} past)`);
   return tenders;
 }
 
