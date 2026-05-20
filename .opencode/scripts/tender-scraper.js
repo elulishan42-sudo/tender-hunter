@@ -11,7 +11,9 @@ const path = require('path');
 const crypto = require('crypto');
 
 const CONFIG_FILE = path.join(__dirname, '../data/tender-config.json');
-const CACHE_FILE = path.join(__dirname, '../data/tender-cache.json');
+// Caches are per-source — the two scraper workflows run on different schedules
+// and shouldn't clobber each other's cache file mid-run.
+const cacheFile = (source) => path.join(__dirname, `../data/tender-cache-${source}.json`);
 
 // TenderFlow API — user is identified by the Bearer token, no separate user_id needed
 const TENDERFLOW_API = 'https://tender-flow-v2.vercel.app/api/agent/ingest-tenders';
@@ -120,17 +122,19 @@ function computeFingerprint(tender) {
   return crypto.createHash('sha256').update(name + entity + dateStr).digest('hex');
 }
 
-function loadCache() {
+function loadCache(source) {
+  const file = cacheFile(source);
   try {
-    if (fs.existsSync(CACHE_FILE)) return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {}
   return { tenders: [], lastRun: null };
 }
 
-function saveCache(cache) {
+function saveCache(source, cache) {
+  const file = cacheFile(source);
   cache.lastRun = new Date().toISOString();
-  fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cache, null, 2));
 }
 
 async function fetchWithRetry(url, options, retries = 2) {
@@ -758,11 +762,12 @@ const CATEGORY_EMOJI = {
   'Other': '📋',
 };
 
-function formatDigest(tenders) {
+function formatDigest(tenders, sourceLabel) {
   const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  const header = sourceLabel ? `📋 ${sourceLabel.toUpperCase()} DIGEST — ${today}` : `📋 TENDER DIGEST — ${today}`;
 
   if (tenders.length === 0) {
-    return `📋 TENDER DIGEST — ${today}
+    return `${header}
 ━━━━━━━━━━━━━━━━━━━━
 
 No new tenders found today.
@@ -799,7 +804,7 @@ No new tenders found today.
 
   const categoryCount = Object.keys(byCategory).length;
 
-  let msg = `📋 TENDER DIGEST — ${today}\n`;
+  let msg = `${header}\n`;
   msg += `${tenders.length} new tender${tenders.length === 1 ? '' : 's'}`;
   msg += ` · ${categoryCount} categor${categoryCount === 1 ? 'y' : 'ies'}`;
   msg += `\n━━━━━━━━━━━━━━━━━━━━`;
@@ -865,40 +870,47 @@ async function sendToTelegram(message) {
   return false;
 }
 
+// Each workflow invocation scrapes exactly one source, gated by SOURCE env var.
+// The two sources run on independent schedules so neither blocks the other and
+// the per-source cache files stay race-free.
+const SOURCES = {
+  merkato: { label: '2Merkato', scrape: (cache) => scrapeMerkato(cache) },
+  egp:     { label: 'EGP',      scrape: (_cache) => scrapeEgp() },
+};
+
 async function main() {
-  console.log('=== Tender Hunter ===');
+  const source = (process.env.SOURCE || '').toLowerCase();
+  if (!SOURCES[source]) {
+    console.error(`SOURCE env var must be one of: ${Object.keys(SOURCES).join(', ')}`);
+    return false;
+  }
+  const { label, scrape } = SOURCES[source];
+
+  console.log(`=== Tender Hunter — ${label} ===`);
   const filters = loadConfig();
-  const cache = loadCache();
+  const cache = loadCache(source);
 
-  console.log('Scraping 2Merkato + EGP in parallel...');
-  const [merkatoTenders, egpTenders] = await Promise.all([
-    scrapeMerkato(cache).catch(e => {
-      console.error(`2Merkato failed: ${e.message}`);
-      return [];
-    }),
-    scrapeEgp().catch(e => {
-      console.error(`EGP failed: ${e.message}`);
-      return [];
-    }),
-  ]);
+  let tenders;
+  try {
+    tenders = await scrape(cache);
+  } catch (e) {
+    console.error(`${label} scrape failed: ${e.message}`);
+    return false;
+  }
+  console.log(`Total scraped from ${label}: ${tenders.length}`);
 
-  const allTenders = [...merkatoTenders, ...egpTenders];
-  console.log(`Total scraped: 2Merkato=${merkatoTenders.length} + EGP=${egpTenders.length} = ${allTenders.length}`);
-
-  if (allTenders.length === 0) {
-    console.error('Both sources returned 0 tenders — possible auth or site issue');
+  if (tenders.length === 0) {
+    console.error(`${label} returned 0 tenders — possible auth or site issue`);
     return false;
   }
 
-  const filtered = filterTenders(allTenders, filters, cache);
+  const filtered = filterTenders(tenders, filters, cache);
   console.log(`New tenders: ${filtered.length}`);
 
-  // Send to TenderFlow first
   console.log('\nSending to TenderFlow...');
   const tfResult = await sendToTenderFlow(filtered);
 
-  // Format and send Telegram digest
-  const msg = formatDigest(filtered);
+  const msg = formatDigest(filtered, label);
   const sent = await sendToTelegram(msg);
 
   if (!tfResult.success && !sent) {
@@ -906,9 +918,8 @@ async function main() {
     return false;
   }
 
-  // Update cache — attach fingerprints so future runs dedup even if 2Merkato changes the URL/ID
   const filteredWithFingerprint = filtered.map(t => ({ ...t, fingerprint: computeFingerprint(t) }));
-  saveCache({
+  saveCache(source, {
     tenders: [...cache.tenders, ...filteredWithFingerprint].slice(-5000),
     lastRun: new Date().toISOString()
   });

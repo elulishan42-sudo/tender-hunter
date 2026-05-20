@@ -2,35 +2,24 @@
 
 Daily Ethiopian government tender aggregator. Scrapes [2Merkato](https://tender.2merkato.com) and the [EGP portal](https://production.egp.gov.et), filters by procurement category, pushes each tender to [TenderFlow](https://tender-flow-v2.vercel.app) via its ingest API, and sends a compact digest to a Telegram chat.
 
-Runs unattended on GitHub Actions every morning.
+Runs unattended on GitHub Actions — **2Merkato in the morning and EGP in the afternoon**, on independent schedules.
 
 ## How it works
 
 ```
-GitHub Actions cron (06:00 UTC / 09:00 Addis)
-         |
-         v
-tender-scraper.js
-   |                        |
-   v  (in parallel)         v
-2Merkato                  EGP
-(Playwright login + cat.  (public JSON API,
-scrape, ~40s)             single fetch, ~2s)
-   |                        |
-   +-----------+------------+
-               |
-               v
-      filter  +  dedup
-   (cache + SHA-256 fingerprint)
-               |
-        +------+------+
-        |             |
-        v             v
-   TenderFlow       Telegram
-   ingest API       digest
+.github/workflows/
+  tender-hunter-merkato.yml  →  cron 03:00 UTC  (06:00 Addis)
+  tender-hunter-egp.yml      →  cron 11:00 UTC  (14:00 Addis)
+
+Each workflow invokes tender-scraper.js with SOURCE=merkato or SOURCE=egp.
+The script then runs:
+
+  scrape   →   filter + dedup (per-source cache + fingerprint)
+              ↓
+              TenderFlow ingest API + Telegram digest
 ```
 
-Both scrapers run under `Promise.all`. Either failing is caught and logged; we only abort the run if both return zero.
+The two runs are independent: separate cache files, separate Telegram digests, separate API quota windows. Either failing doesn't affect the other.
 
 ## Sources
 
@@ -66,7 +55,12 @@ Configured in [.opencode/data/tender-config.json](.opencode/data/tender-config.j
 
 ## Deployment
 
-Scheduled via [.github/workflows/tender-hunter.yml](.github/workflows/tender-hunter.yml). Also triggerable manually via **workflow_dispatch**.
+Two independent workflows, each with its own cron and `workflow_dispatch` trigger:
+
+- [.github/workflows/tender-hunter-merkato.yml](.github/workflows/tender-hunter-merkato.yml) — `SOURCE=merkato`, runs 03:00 UTC
+- [.github/workflows/tender-hunter-egp.yml](.github/workflows/tender-hunter-egp.yml) — `SOURCE=egp`, runs 11:00 UTC
+
+Per-source caches at `.opencode/data/tender-cache-merkato.json` and `tender-cache-egp.json` (both gitignored).
 
 ### Secrets (Repo Settings → Secrets → Actions)
 

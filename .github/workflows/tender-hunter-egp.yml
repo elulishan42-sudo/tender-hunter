@@ -1,8 +1,7 @@
-name: Tender Hunter
+name: Tender Hunter — EGP
 on:
   schedule:
-    - cron: '0 23 * * *' # 2AM Ethiopia time (UTC+3)
-    - cron: '0 10 * * *' # 1PM Ethiopia time (UTC+3)
+    - cron: '0 11 * * *' # 2PM Ethiopia time (UTC+3)
   workflow_dispatch:
 
 jobs:
@@ -10,23 +9,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          
+
       - name: Install dependencies
         run: cd .opencode && npm ci
-        
-      - name: Install Playwright browsers
-        run: cd .opencode && npx playwright install chromium --with-deps
-        
+
+      # EGP uses a public JSON API and doesn't need a browser; skipping
+      # Playwright install saves ~30s per run.
+
       - name: Run scraper
         env:
+          SOURCE: egp
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
-          MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
-          MERKATO_PASSWORD: ${{ secrets.MERKATO_PASSWORD }}
           TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
         run: node .opencode/scripts/tender-scraper.js

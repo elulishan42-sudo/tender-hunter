@@ -1,6 +1,7 @@
 # Keep config but exclude cache and credentials
 .opencode/data/tender-config.json
 .opencode/data/tender-cache.json
+.opencode/data/tender-cache-*.json
 .data/
 *.log
 node_modules/
