@@ -1,32 +1,45 @@
 # Tender Hunter
 
-Daily Ethiopian government tender aggregator. Scrapes [2Merkato](https://tender.2merkato.com) and the [EGP portal](https://production.egp.gov.et), filters by procurement category, pushes each tender to [TenderFlow](https://tender-flow-v2.vercel.app) via its ingest API, and sends a compact digest to a Telegram chat.
-
-Runs unattended on GitHub Actions — **2Merkato in the morning and EGP in the afternoon**, on independent schedules.
+Near-real-time Ethiopian government tender aggregator. Scrapes [2Merkato](https://tender.2merkato.com) and the [EGP portal](https://production.egp.gov.et) on a **30-minute cron**, ships only newly-posted tenders to [TenderFlow](https://tender-flow-v2.vercel.app), and sends a compact Telegram digest **only when something new is found** (no silent pings).
 
 ## How it works
 
 ```
-.github/workflows/
-  tender-hunter-merkato.yml  →  cron 03:00 UTC  (06:00 Addis)
-  tender-hunter-egp.yml      →  cron 11:00 UTC  (14:00 Addis)
-
-Each workflow invokes tender-scraper.js with SOURCE=merkato or SOURCE=egp.
-The script then runs:
-
-  scrape   →   filter + dedup (per-source cache + fingerprint)
-              ↓
-              TenderFlow ingest API + Telegram digest
+.github/workflows/tender-hunter.yml   →  cron */30 * * * *  (every 30 minutes)
+        │
+        ▼
+  Restore cross-run cache (actions/cache)
+        │
+        ▼
+  tender-scraper.js
+        │
+        ▼
+  ┌───── 2Merkato ─────┐         ┌────── EGP ──────┐
+  │ login + walk feed  │  then   │ paginate JSON   │
+  │ page-by-page until │  ────►  │ page-by-page    │
+  │ "caught up"        │         │ until "caught   │
+  └────────────────────┘         │ up"             │
+        │                        └─────────────────┘
+        ▼
+  filter + fingerprint dedup
+        │
+        ▼
+  Skip if nothing new ─── otherwise ─► TenderFlow + Telegram
+        │
+        ▼
+  Save cache (actions/cache)
 ```
 
-The two runs are independent: separate cache files, separate Telegram digests, separate API quota windows. Either failing doesn't affect the other.
+Both sources run sequentially in one job. **Each scraper walks listings newest-first and stops the moment a page contributes zero uncached tenderIds** — meaning everything beyond is older and we've already seen it. Warm-cache runs finish in seconds.
 
 ## Sources
 
-| Source   | Access          | How                                                                                                                            |
-| -------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| 2Merkato | Login required  | Playwright walks the unfiltered tender feed; parallel listing pagination + parallel detail fetch (4 listing + 5 detail workers) |
-| EGP      | Public JSON API | Paginated GET `/po-gw/cms-v2/api/sourcing/get-grouped-sourcing` — fetches every open bid                                       |
+| Source   | Access          | How                                                                                                       |
+| -------- | --------------- | --------------------------------------------------------------------------------------------------------- |
+| 2Merkato | Login required  | Playwright walks the unfiltered tender feed sequentially; 10 parallel detail-fetch workers                |
+| EGP      | Public JSON API | Paginated GET `/po-gw/cms-v2/api/sourcing/get-grouped-sourcing?orderBy=invitationDate desc` — no browser  |
+
+Both walk newest-first and use the **early-termination rule**: as soon as a page yields zero uncached tenderIds, the source is "caught up" and we stop paginating.
 
 ### Categories
 
@@ -55,12 +68,13 @@ Configured in [.opencode/data/tender-config.json](.opencode/data/tender-config.j
 
 ## Deployment
 
-Two independent workflows, each with its own cron and `workflow_dispatch` trigger:
+Single workflow on a 30-minute cron — [.github/workflows/tender-hunter.yml](.github/workflows/tender-hunter.yml). Also triggerable manually via **workflow_dispatch**.
 
-- [.github/workflows/tender-hunter-merkato.yml](.github/workflows/tender-hunter-merkato.yml) — `SOURCE=merkato`, runs 03:00 UTC
-- [.github/workflows/tender-hunter-egp.yml](.github/workflows/tender-hunter-egp.yml) — `SOURCE=egp`, runs 11:00 UTC
+Cache files (`tender-cache-merkato.json` and `tender-cache-egp.json`) are gitignored locally and persisted across runs via `actions/cache@v4`. Cold-start (first run after deploy / cache eviction) is one-time pain; every run after is incremental.
 
-Per-source caches at `.opencode/data/tender-cache-merkato.json` and `tender-cache-egp.json` (both gitignored).
+### Cost
+
+At every 30 min, 1 combined run = 48 runs/day = ~1440 GitHub Actions minutes/month. **Within the 2000-min/month free tier for private repos.**
 
 ### Secrets (Repo Settings → Secrets → Actions)
 
@@ -99,13 +113,13 @@ Environment variables take precedence over the config file, matching the CI flow
 | Want to...                                | Edit                                                                 |
 | ----------------------------------------- | -------------------------------------------------------------------- |
 | Improve category classification           | `CATEGORY_KEYWORDS` in [tender-scraper.js](.opencode/scripts/tender-scraper.js) (lowercase, partial matches OK) |
-| 2Merkato max tenders per run              | `MAX_TOTAL` in `scrapeMerkato()` (default 1000)                      |
-| 2Merkato pagination depth                 | `MAX_PAGES` in `scrapeMerkato()` (default 80)                        |
-| 2Merkato listing concurrency              | `LISTING_CONCURRENCY` in `scrapeMerkato()` (default 4)               |
-| 2Merkato detail concurrency               | `DETAIL_CONCURRENCY` in `scrapeMerkato()` (default 5)                |
-| EGP pagination cap                        | `MAX_PAGES` in `scrapeEgp()` (default 50, ~5000 bids)                |
-| Cache retention                           | `slice(-5000)` in the `saveCache` call inside `main()`               |
-| Daily run time                            | Cron expression in [tender-hunter.yml](.github/workflows/tender-hunter.yml) |
+| Exclude additional keywords               | `EXCLUDE_PATTERNS` (word-boundary regex)                             |
+| Deadline window                           | `isDeadlineInWindow()` — currently `(now+2d, now+30d)` and current year |
+| 2Merkato cold-start safety caps           | `MAX_TOTAL` / `MAX_PAGES` in `scrapeMerkato()`                       |
+| 2Merkato detail concurrency               | `DETAIL_CONCURRENCY` in `scrapeMerkato()` (default 10)               |
+| EGP cold-start safety cap                 | `MAX_PAGES` in `scrapeEgp()` (default 50)                            |
+| Cache retention per source                | `slice(-5000)` in `runSource()`                                      |
+| Scrape interval                           | Cron expression in [tender-hunter.yml](.github/workflows/tender-hunter.yml) (default `*/30 * * * *`) |
 
 ## File map
 

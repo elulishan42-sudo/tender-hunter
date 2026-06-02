@@ -385,10 +385,14 @@ function buildMerkatoTender(card, details) {
 }
 
 async function scrapeMerkato(cache) {
-  const MAX_TOTAL = 1000;
-  const MAX_PAGES = 80;             // 80 pages × ~15 cards = up to ~1200 candidates
-  const LISTING_CONCURRENCY = 4;    // parallel listing-page workers
-  const DETAIL_CONCURRENCY = 10;    // parallel detail-page workers
+  // Incremental scrape: 2Merkato's listing is sorted newest-first, so we walk
+  // sequentially from page 1 and stop as soon as a page contributes ZERO new
+  // (uncached) tenderIds — meaning everything beyond is older and we've caught
+  // up since the last run. Steady-state runs touch 1 page; cold start (empty
+  // cache) walks up to MAX_PAGES once, then never again.
+  const MAX_PAGES = 80;             // safety cap; incremental runs stop way earlier
+  const MAX_TOTAL = 1000;           // safety cap on cold start
+  const DETAIL_CONCURRENCY = 10;
   const cachedIds = new Set((cache?.tenders || []).map(t => t.tenderId));
 
   const browser = await chromium.launch({
@@ -399,7 +403,6 @@ async function scrapeMerkato(cache) {
   const tenders = [];
 
   try {
-    // Login on a dedicated page; cookies persist in the browser context for everyone else
     const loginPage = await browser.newPage();
     await blockResources(loginPage);
     const loggedIn = await login(loginPage);
@@ -410,92 +413,71 @@ async function scrapeMerkato(cache) {
       return [];
     }
 
-    console.log('Scraping 2Merkato (unfiltered feed)...');
+    console.log(`Scraping 2Merkato (incremental; ${cachedIds.size} cached IDs)...`);
 
-    const listingPages = [];
+    const listingPage = await browser.newPage();
+    await blockResources(listingPage);
     const detailPages = [];
-    for (let i = 0; i < LISTING_CONCURRENCY; i++) {
-      const p = await browser.newPage();
-      await blockResources(p);
-      listingPages.push(p);
-    }
     for (let i = 0; i < DETAIL_CONCURRENCY; i++) {
       const p = await browser.newPage();
       await blockResources(p);
       detailPages.push(p);
     }
 
-    // Phase 1: parallel listing-page collection with shared cursor
-    const allCards = [];
-    const seenIds = new Set();
-    let pageCursor = 1;
-    let stop = false;
-
-    const fetchListing = async (page) => {
-      while (!stop) {
-        const pageNum = pageCursor++;
-        if (pageNum > MAX_PAGES) break;
-        if (allCards.length >= MAX_TOTAL) break;
-
-        const url = `https://tender.2merkato.com/tenders?page=${pageNum}`;
-        const cards = await scrapeListingPage(page, url);
-
-        if (cards.length === 0) { stop = true; break; }
-
-        let newThisPage = 0;
-        for (const c of cards) {
-          if (seenIds.has(c.tenderId)) continue;
-          seenIds.add(c.tenderId);
-          allCards.push(c);
-          newThisPage++;
-          if (allCards.length >= MAX_TOTAL) break;
-        }
-
-        console.log(`  Listing page ${pageNum}: ${cards.length} cards (${newThisPage} new, ${allCards.length} total)`);
-        if (newThisPage === 0) { stop = true; break; } // pagination wrapped
-      }
-    };
-
-    await Promise.all(listingPages.map(p => fetchListing(p)));
-    console.log(`  Collected ${allCards.length} cards across listing`);
-
     const now = new Date();
 
-    // User-excluded: drop construction/services/consultancy cards based on title.
-    // Done before the cache-pre-filter so excluded tenders never enter the cache.
-    const targetCards = allCards.slice(0, MAX_TOTAL);
-    const allowedCards = targetCards.filter(c => !isExcluded(c.title));
-    const excludedCount = targetCards.length - allowedCards.length;
+    // Phase 1: sequential listing pagination with early termination
+    const candidates = [];                          // cards that survived pre-filters and need detail-fetch
+    const seenIds = new Set();
+    let droppedExcluded = 0, droppedOutOfWindow = 0, alreadyCached = 0;
+    let stoppedReason = `hit MAX_PAGES (${MAX_PAGES})`;
 
-    // Deadline window pre-filter using card.daysLeft (parsed from listing text).
-    // Cards with unknown daysLeft are deferred to the post-detail check.
-    const windowCards = allowedCards.filter(c => {
-      if (c.daysLeft == null) return true;
-      return c.daysLeft > 2 && c.daysLeft < 30;
-    });
-    const outOfWindowByCard = allowedCards.length - windowCards.length;
+    for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
+      if (candidates.length >= MAX_TOTAL) { stoppedReason = `MAX_TOTAL (${MAX_TOTAL})`; break; }
 
-    // Pre-filter: cards already in the cache would be dropped by filterTenders
-    // anyway. Skipping their detail fetch is the single biggest win in steady
-    // state — only truly new cards pay the navigation cost.
-    const newCards = windowCards.filter(c => !cachedIds.has(c.tenderId));
-    const cachedSkipped = windowCards.length - newCards.length;
+      const url = `https://tender.2merkato.com/tenders?page=${pageNum}`;
+      const cards = await scrapeListingPage(listingPage, url);
 
-    const parts = [];
-    if (excludedCount > 0) parts.push(`${excludedCount} excluded by keyword`);
-    if (outOfWindowByCard > 0) parts.push(`${outOfWindowByCard} out-of-window by daysLeft`);
-    if (cachedSkipped > 0) parts.push(`${cachedSkipped} already cached`);
-    const prefix = parts.length ? `  ${parts.join('; ')}; ` : '  ';
-    console.log(`${prefix}fetching details for ${newCards.length} new (concurrency ${DETAIL_CONCURRENCY})`);
+      if (cards.length === 0) { stoppedReason = 'empty page'; break; }
+
+      let newOnPage = 0;
+      for (const c of cards) {
+        if (seenIds.has(c.tenderId)) continue;
+        seenIds.add(c.tenderId);
+
+        if (cachedIds.has(c.tenderId)) { alreadyCached++; continue; }
+        newOnPage++; // counts ALL uncached cards (even ones we'll drop) so the early-termination signal isn't masked by keyword/window filters
+
+        if (isExcluded(c.title)) { droppedExcluded++; continue; }
+        if (c.daysLeft != null && (c.daysLeft <= 2 || c.daysLeft >= 30)) { droppedOutOfWindow++; continue; }
+
+        candidates.push(c);
+      }
+
+      console.log(`  Listing page ${pageNum}: ${cards.length} cards, ${newOnPage} uncached, ${candidates.length} candidates so far`);
+
+      // If a page yields zero uncached tenderIds, every subsequent page (older posts) is cached too.
+      if (newOnPage === 0) { stoppedReason = 'caught up'; break; }
+    }
+
+    console.log(`  Listing done — ${stoppedReason}. Pre-filter dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window by daysLeft; ${alreadyCached} cards already cached.`);
+
+    if (candidates.length === 0) {
+      console.log('  No new tenders to fetch details for');
+      await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
+      return [];
+    }
+
+    console.log(`  Fetching details for ${candidates.length} new candidates (concurrency ${DETAIL_CONCURRENCY})`);
 
     // Phase 2: parallel detail fetches via worker pool. Failed details still
     // produce a tender with listing-only data — never silently lose one.
     let detailCursor = 0;
     let droppedPostDetail = 0;
     const fetchDetail = async (page) => {
-      while (detailCursor < newCards.length) {
+      while (detailCursor < candidates.length) {
         const i = detailCursor++;
-        const card = newCards[i];
+        const card = candidates[i];
         let t;
         try {
           const details = await getTenderDetails(page, card.url);
@@ -504,7 +486,6 @@ async function scrapeMerkato(cache) {
           console.log(`  Detail fetch failed for ${card.tenderId}: ${e.message}`);
           t = buildMerkatoTender(card, null);
         }
-        // Strict window check using the precise deadline now available
         if (isDeadlineInWindow(t.deadline, now)) {
           tenders.push(t);
         } else {
@@ -519,8 +500,7 @@ async function scrapeMerkato(cache) {
     const droppedSuffix = droppedPostDetail > 0 ? ` (dropped ${droppedPostDetail} out-of-window after detail)` : '';
     console.log(`  2Merkato: got ${tenders.length} tenders${droppedSuffix}`);
 
-    await Promise.all([...listingPages, ...detailPages].map(p => p.close().catch(() => {})));
-
+    await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
   } finally {
     await browser.close();
   }
@@ -528,20 +508,21 @@ async function scrapeMerkato(cache) {
   return tenders;
 }
 
-async function scrapeEgp() {
-  // Paginate through every open bid. Unmatched-keyword bids fall through to
-  // 'General' instead of being dropped — the user explicitly asked for
-  // exhaustive coverage. Server returns whatever batch size it wants
-  // (observed: requesting top=100 sometimes returns 50), so we use the
-  // returned batch size to drive the next skip rather than assuming top.
-  console.log('Fetching EGP listings (full pagination)...');
+async function scrapeEgp(cache) {
+  // Incremental scrape: orderBy=invitationDate desc means newest bids come first,
+  // so once a page yields zero uncached tenderIds we've caught up — every page
+  // beyond is older and already in cache.
   const TOP = 100;
-  const MAX_PAGES = 50; // safety cap = 5000 bids — generous
+  const MAX_PAGES = 50; // cold-start safety cap (~5000 bids)
+  const cachedIds = new Set((cache?.tenders || []).map(t => t.tenderId));
 
-  const allBids = [];
-  let total = null;
-  let pages = 0;
-  let skip = 0;
+  console.log(`Fetching EGP listings (incremental; ${cachedIds.size} cached IDs)...`);
+
+  const now = new Date();
+  const tenders = [];
+  let droppedOutOfWindow = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
+  let pages = 0, skip = 0;
+  let stoppedReason = `MAX_PAGES (${MAX_PAGES})`;
 
   for (; pages < MAX_PAGES; pages++) {
     const url = `${EGP_API}?type=all&skip=${skip}&top=${TOP}&locale=en&orderBy=invitationDate%20desc`;
@@ -551,84 +532,76 @@ async function scrapeEgp() {
         headers: { 'User-Agent': EGP_USER_AGENT, 'Accept': 'application/json' },
       });
       if (!res.ok) {
-        console.log(`  EGP page ${pages + 1} (skip=${skip}) failed: HTTP ${res.status}`);
+        console.log(`  EGP page ${pages + 1} failed: HTTP ${res.status}`);
+        stoppedReason = `HTTP ${res.status}`;
         break;
       }
       data = await res.json();
     } catch (e) {
-      console.log(`  EGP page ${pages + 1} (skip=${skip}) error: ${e.message}`);
+      console.log(`  EGP page ${pages + 1} error: ${e.message}`);
+      stoppedReason = 'fetch error';
       break;
     }
 
-    if (total === null) total = data.total ?? 0;
-
     let pageBids = 0;
+    let newOnPage = 0;
+
     for (const item of data.items || []) {
       for (const bid of item.result || []) {
-        allBids.push(bid);
         pageBids++;
+        const tid = `egp-${bid.id}`;
+
+        if (cachedIds.has(tid)) { alreadyCached++; continue; }
+        newOnPage++; // counts ALL uncached bids (even ones we'll drop) so early-termination signal isn't masked
+
+        if (!isDeadlineInWindow(bid.submissionDeadline, now)) { droppedOutOfWindow++; continue; }
+        if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
+        const text = `${bid.lotName || ''} ${bid.lotDescription || ''}`;
+        if (isExcluded(text)) { droppedExcluded++; continue; }
+
+        const matched = matchCategory(text);
+        const category = matched || 'General';
+        if (!matched) mappedToGeneral++;
+
+        const deadline = new Date(bid.submissionDeadline);
+        const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
+        const sourceApp = (bid.sourceApplication || 'purchasing').toLowerCase();
+        // Purchasing bids load via /purchasing-quotation-invitations/api/get-quotation-invitation,
+        // which is public and accepts bid.sourceId (NOT bid.id — that returns 204 No Content).
+        // Tendering / Auctioning / Prequalification all require auth, so we link to the
+        // listing page where users can search by the tender_number we already include.
+        const urlId = bid.sourceId || bid.id;
+        const sourceLink = sourceApp === 'purchasing'
+          ? `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`
+          : 'https://production.egp.gov.et/egp/bids/all';
+
+        tenders.push({
+          tenderId: tid,
+          url: sourceLink,
+          title: (bid.lotName || bid.lotDescription || 'Untitled').substring(0, 200).trim(),
+          tenderNumber: (bid.lotReferenceNo || bid.procurementReferenceNo || '').trim(),
+          publishingEntity: (bid.procuringEntity || 'Unknown').trim(),
+          deadline: deadline.toISOString(),
+          daysLeft,
+          isFree: true,
+          category,
+          sourceCategory: bid.procurementCategory || '',
+          tenderType: bid.marketPlace === 'International' ? 'import' : 'local',
+          notes: (bid.lotDescription || '').substring(0, 200).trim(),
+          sourcePortal: 'egp',
+        });
       }
     }
 
-    if (pageBids === 0) break;
-    skip += pageBids; // advance by actual returned count, not by TOP
-    if (allBids.length >= total) break;
+    console.log(`  EGP page ${pages + 1}: ${pageBids} bids, ${newOnPage} uncached, ${tenders.length} accepted so far`);
+
+    if (pageBids === 0) { stoppedReason = 'empty page'; break; }
+    if (newOnPage === 0) { stoppedReason = 'caught up'; break; }
+
+    skip += pageBids;
   }
 
-  console.log(`  EGP: fetched ${allBids.length} of ${total ?? '?'} bids across ${pages} page(s)`);
-
-  const now = new Date();
-  const tenders = [];
-  let droppedOutOfWindow = 0;
-  let droppedExcluded = 0;
-  let mappedToGeneral = 0;
-
-  for (const bid of allBids) {
-    // Deadline must be 2 < daysLeft < 30 AND in the current year.
-    if (!isDeadlineInWindow(bid.submissionDeadline, now)) { droppedOutOfWindow++; continue; }
-    const deadline = new Date(bid.submissionDeadline);
-
-    // User-excluded: Services, Consultancy, Construction
-    if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
-    const text = `${bid.lotName || ''} ${bid.lotDescription || ''}`;
-    if (isExcluded(text)) { droppedExcluded++; continue; }
-
-    const matched = matchCategory(text);
-    const category = matched || 'General';
-    if (!matched) mappedToGeneral++;
-
-    const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
-    const sourceApp = (bid.sourceApplication || 'purchasing').toLowerCase();
-    // Purchasing bids load via /purchasing-quotation-invitations/api/get-quotation-invitation,
-    // which is public and accepts bid.sourceId (NOT bid.id — that returns 204 No Content).
-    // Tendering / Auctioning / Prequalification all route to /tender-administrations/tender-by-id
-    // and equivalents that return 401 Unauthorized for anonymous calls; deep-linking via
-    // those URLs hangs even for logged-in users because the SPA's auth context is
-    // bootstrapped on a different navigation path. Send them to the listing page where
-    // they can search by the tender_number we already include.
-    const urlId = bid.sourceId || bid.id;
-    const sourceLink = sourceApp === 'purchasing'
-      ? `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`
-      : 'https://production.egp.gov.et/egp/bids/all';
-
-    tenders.push({
-      tenderId: `egp-${bid.id}`,
-      url: sourceLink,
-      title: (bid.lotName || bid.lotDescription || 'Untitled').substring(0, 200).trim(),
-      tenderNumber: (bid.lotReferenceNo || bid.procurementReferenceNo || '').trim(),
-      publishingEntity: (bid.procuringEntity || 'Unknown').trim(),
-      deadline: deadline.toISOString(),
-      daysLeft,
-      isFree: true,
-      category,
-      sourceCategory: bid.procurementCategory || '',
-      tenderType: bid.marketPlace === 'International' ? 'import' : 'local',
-      notes: (bid.lotDescription || '').substring(0, 200).trim(),
-      sourcePortal: 'egp',
-    });
-  }
-
-  console.log(`  EGP: ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window)`);
+  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window; ${alreadyCached} already cached).`);
   return tenders;
 }
 
@@ -900,61 +873,80 @@ async function sendToTelegram(message) {
   return false;
 }
 
-// Each workflow invocation scrapes exactly one source, gated by SOURCE env var.
-// The two sources run on independent schedules so neither blocks the other and
-// the per-source cache files stay race-free.
-const SOURCES = {
-  merkato: { label: '2Merkato', scrape: (cache) => scrapeMerkato(cache) },
-  egp:     { label: 'EGP',      scrape: (_cache) => scrapeEgp() },
-};
+// Combined run: both sources sequentially in one workflow invocation. Each
+// source has its own cache file (separate dedup state); both rely on the
+// incremental scrape + early-termination path so warm-cache runs finish in seconds.
+const SOURCES = [
+  { key: 'merkato', label: '2Merkato', scrape: scrapeMerkato },
+  { key: 'egp',     label: 'EGP',      scrape: scrapeEgp },
+];
 
-async function main() {
-  const source = (process.env.SOURCE || '').toLowerCase();
-  if (!SOURCES[source]) {
-    console.error(`SOURCE env var must be one of: ${Object.keys(SOURCES).join(', ')}`);
-    return false;
-  }
-  const { label, scrape } = SOURCES[source];
-
-  console.log(`=== Tender Hunter — ${label} ===`);
-  const filters = loadConfig();
-  const cache = loadCache(source);
+async function runSource({ key, label, scrape }, filters) {
+  console.log(`\n--- ${label} ---`);
+  const cache = loadCache(key);
 
   let tenders;
   try {
     tenders = await scrape(cache);
   } catch (e) {
     console.error(`${label} scrape failed: ${e.message}`);
-    return false;
+    return { ok: false };
   }
-  console.log(`Total scraped from ${label}: ${tenders.length}`);
 
   if (tenders.length === 0) {
-    console.error(`${label} returned 0 tenders — possible auth or site issue`);
-    return false;
+    console.log(`${label}: nothing new to process`);
+    return { ok: true, sent: 0 };
   }
 
   const filtered = filterTenders(tenders, filters, cache);
-  console.log(`New tenders: ${filtered.length}`);
+  console.log(`${label}: ${filtered.length} new after fingerprint filter`);
 
-  console.log('\nSending to TenderFlow...');
+  if (filtered.length === 0) {
+    // Tenders scraped but all matched a known fingerprint (probably a re-post
+    // under a new tenderId). Still cache them so we don't re-fetch next run.
+    const skipFp = tenders.map(t => ({ tenderId: t.tenderId, fingerprint: computeFingerprint(t) }));
+    saveCache(key, {
+      tenders: [...cache.tenders, ...skipFp].slice(-5000),
+      lastRun: new Date().toISOString(),
+    });
+    return { ok: true, sent: 0 };
+  }
+
+  console.log(`${label}: sending to TenderFlow...`);
   const tfResult = await sendToTenderFlow(filtered);
 
   const msg = formatDigest(filtered, label);
   const sent = await sendToTelegram(msg);
 
   if (!tfResult.success && !sent) {
-    console.error('Both TenderFlow and Telegram delivery failed');
-    return false;
+    console.error(`${label}: both TenderFlow and Telegram delivery failed`);
   }
 
   const filteredWithFingerprint = filtered.map(t => ({ ...t, fingerprint: computeFingerprint(t) }));
-  saveCache(source, {
+  saveCache(key, {
     tenders: [...cache.tenders, ...filteredWithFingerprint].slice(-5000),
-    lastRun: new Date().toISOString()
+    lastRun: new Date().toISOString(),
   });
 
-  return true;
+  return { ok: true, sent: filtered.length };
+}
+
+async function main() {
+  console.log(`=== Tender Hunter — combined run @ ${new Date().toISOString()} ===`);
+  const filters = loadConfig();
+
+  let anyOk = false;
+  let totalSent = 0;
+  for (const source of SOURCES) {
+    const result = await runSource(source, filters);
+    if (result.ok) {
+      anyOk = true;
+      totalSent += result.sent || 0;
+    }
+  }
+
+  console.log(`\n=== Run complete: ${totalSent} new tender(s) sent across all sources ===`);
+  return anyOk;
 }
 
 main().then(s => process.exit(s ? 0 : 1)).catch(e => { console.error(e); process.exit(1); });

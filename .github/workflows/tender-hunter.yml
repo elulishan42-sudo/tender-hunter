@@ -1,8 +1,14 @@
-name: Tender Hunter — 2Merkato
+name: Tender Hunter
 on:
   schedule:
-    - cron: '0 3 * * *' # 6AM Ethiopia time (UTC+3)
+    - cron: '*/30 * * * *' # every 30 minutes
   workflow_dispatch:
+
+# Skip overlapping runs — if a previous run is still going (unlikely, but
+# possible on slow days), cancel it rather than queue another.
+concurrency:
+  group: tender-hunter
+  cancel-in-progress: true
 
 jobs:
   scrape:
@@ -15,6 +21,18 @@ jobs:
         with:
           node-version: 20
 
+      - name: Restore tender caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .opencode/data/tender-cache-merkato.json
+            .opencode/data/tender-cache-egp.json
+          # Unique key per run so we always save a fresh snapshot; restore-keys
+          # pulls the latest matching prefix from a previous run.
+          key: tender-cache-${{ github.run_id }}
+          restore-keys: |
+            tender-cache-
+
       - name: Install dependencies
         run: cd .opencode && npm ci
 
@@ -23,7 +41,6 @@ jobs:
 
       - name: Run scraper
         env:
-          SOURCE: merkato
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
           MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
