@@ -390,8 +390,10 @@ async function scrapeMerkato(cache) {
   // (uncached) tenderIds — meaning everything beyond is older and we've caught
   // up since the last run. Steady-state runs touch 1 page; cold start (empty
   // cache) walks up to MAX_PAGES once, then never again.
-  const MAX_PAGES = 80;             // safety cap; incremental runs stop way earlier
-  const MAX_TOTAL = 1000;           // safety cap on cold start
+  const MAX_PAGES = 15;             // safety cap; incremental runs stop way earlier
+  const MAX_TOTAL = 100;            // cold-start cap — captures most-recent N. Real-time use
+                                    // case: new posts arrive every 30 min, not bulk backfill.
+                                    // Each subsequent run picks up new posts within the cache window.
   const DETAIL_CONCURRENCY = 10;
   const cachedIds = new Set((cache?.tenders || []).map(t => t.tenderId));
 
