@@ -343,7 +343,7 @@ async function scrapeListingPage(page, url) {
 
       const isFree = c.cardText.includes('FREE') || !c.cardText.includes('Buy Now');
 
-      results.push({ tenderId: c.tenderId, url: c.url, title, bidClosingDate, daysLeft, isFree, cardText: c.cardText.substring(0, 400) });
+      results.push({ tenderId: c.tenderId, url: c.url, title, bidClosingDate, daysLeft, isFree });
     }
 
     return results;
@@ -491,10 +491,6 @@ async function scrapeMerkato(cache) {
       while (detailCursor < candidates.length) {
         const i = detailCursor++;
         const card = candidates[i];
-        if (i < 2) {
-          console.log(`  [DEBUG] candidate ${i}: daysLeft=${card.daysLeft} bidClosingDate=${JSON.stringify(card.bidClosingDate)}`);
-          console.log(`  [DEBUG] cardText (first 400ch): ${JSON.stringify(card.cardText)}`);
-        }
         processedIds.push(card.tenderId);
         let t;
         try {
@@ -503,6 +499,15 @@ async function scrapeMerkato(cache) {
         } catch (e) {
           console.log(`  Detail fetch failed for ${card.tenderId}: ${e.message}`);
           t = buildMerkatoTender(card, null);
+        }
+        // If no deadline could be extracted at any layer (detail regex, listing
+        // bidClosingDate, daysLeft synthesis), default to 14 days out so the
+        // tender still flows. Better to show it with an estimated deadline than
+        // silently drop a truly-new tender because of a parse mismatch.
+        const parsed = t.deadline ? new Date(t.deadline) : null;
+        if (!parsed || isNaN(parsed)) {
+          t.deadline = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+          t.deadlineEstimated = true;
         }
         if (isDeadlineInWindow(t.deadline, now)) {
           tenders.push(t);
