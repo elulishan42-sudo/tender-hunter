@@ -362,6 +362,16 @@ function buildMerkatoTender(card, details) {
       if (!isNaN(date)) isoDeadline = date.toISOString();
     } catch (e) {}
   }
+  // Last-ditch fallback: if both detail- and listing-card date parsers failed
+  // but the listing card *did* surface a "N days left" count, synthesize a
+  // deadline from now + N. The pre-filter already validated card.daysLeft was
+  // in window, so this keeps the tender from being dropped post-detail just
+  // because the page format shifted out from under our regex.
+  if (!isoDeadline && card.daysLeft != null && card.daysLeft > 0) {
+    const synth = new Date();
+    synth.setDate(synth.getDate() + card.daysLeft);
+    isoDeadline = synth.toISOString();
+  }
 
   // Bucket via keyword on title + notes (description). Falls through to 'General'.
   const text = `${card.title || ''} ${details.notes || ''}`;
@@ -412,7 +422,7 @@ async function scrapeMerkato(cache) {
 
     if (!loggedIn) {
       console.log('Failed to login, skipping 2Merkato');
-      return [];
+      return { tenders: [], processedIds: [] };
     }
 
     console.log(`Scraping 2Merkato (incremental; ${cachedIds.size} cached IDs)...`);
@@ -467,7 +477,7 @@ async function scrapeMerkato(cache) {
     if (candidates.length === 0) {
       console.log('  No new tenders to fetch details for');
       await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
-      return [];
+      return { tenders: [], processedIds: [] };
     }
 
     console.log(`  Fetching details for ${candidates.length} new candidates (concurrency ${DETAIL_CONCURRENCY})`);
@@ -476,10 +486,12 @@ async function scrapeMerkato(cache) {
     // produce a tender with listing-only data — never silently lose one.
     let detailCursor = 0;
     let droppedPostDetail = 0;
+    const processedIds = [];   // every candidate we detail-fetched, so the caller can cache them
     const fetchDetail = async (page) => {
       while (detailCursor < candidates.length) {
         const i = detailCursor++;
         const card = candidates[i];
+        processedIds.push(card.tenderId);
         let t;
         try {
           const details = await getTenderDetails(page, card.url);
@@ -503,11 +515,11 @@ async function scrapeMerkato(cache) {
     console.log(`  2Merkato: got ${tenders.length} tenders${droppedSuffix}`);
 
     await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
+
+    return { tenders, processedIds };
   } finally {
     await browser.close();
   }
-
-  return tenders;
 }
 
 async function scrapeEgp(cache) {
@@ -604,7 +616,8 @@ async function scrapeEgp(cache) {
   }
 
   console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window; ${alreadyCached} already cached).`);
-  return tenders;
+  // EGP has no detail-fetch step, so there's no "processed but dropped" set to cache.
+  return { tenders, processedIds: [] };
 }
 
 function filterTenders(tenders, filters, cache) {
@@ -869,16 +882,35 @@ async function runSource({ key, label, scrape }, filters) {
   console.log(`\n--- ${label} ---`);
   const cache = loadCache(key);
 
-  let tenders;
+  let result;
   try {
-    tenders = await scrape(cache);
+    result = await scrape(cache);
   } catch (e) {
     console.error(`${label} scrape failed: ${e.message}`);
     return { ok: false };
   }
 
+  const tenders = result.tenders || [];
+  const processedIds = result.processedIds || [];
+
+  // Build the set of tenderIds we should add to cache as "skip-only" — those we
+  // detail-fetched (or otherwise paid the cost on) but did not push as tenders.
+  // Caching them prevents the same dead-ends from re-running every 30 min.
+  const tenderIdSet = new Set(tenders.map(t => t.tenderId));
+  const skipOnlyIds = processedIds.filter(id => !tenderIdSet.has(id));
+  const skipOnlyEntries = skipOnlyIds.map(id => ({ tenderId: id, fingerprint: null }));
+
+  const persistCache = (extras) => {
+    saveCache(key, {
+      tenders: [...cache.tenders, ...skipOnlyEntries, ...extras].slice(-5000),
+      lastRun: new Date().toISOString(),
+    });
+  };
+
   if (tenders.length === 0) {
-    console.log(`${label}: nothing new to process`);
+    // Still save the skip-only entries so we don't re-fetch the same dropped candidates.
+    if (skipOnlyEntries.length > 0) persistCache([]);
+    console.log(`${label}: nothing new to process${skipOnlyEntries.length ? ` (cached ${skipOnlyEntries.length} skip-only IDs)` : ''}`);
     return { ok: true, sent: 0 };
   }
 
@@ -886,13 +918,9 @@ async function runSource({ key, label, scrape }, filters) {
   console.log(`${label}: ${filtered.length} new after fingerprint filter`);
 
   if (filtered.length === 0) {
-    // Tenders scraped but all matched a known fingerprint (probably a re-post
-    // under a new tenderId). Still cache them so we don't re-fetch next run.
+    // Tenders all matched a known fingerprint. Cache them so we don't re-fetch.
     const skipFp = tenders.map(t => ({ tenderId: t.tenderId, fingerprint: computeFingerprint(t) }));
-    saveCache(key, {
-      tenders: [...cache.tenders, ...skipFp].slice(-5000),
-      lastRun: new Date().toISOString(),
-    });
+    persistCache(skipFp);
     return { ok: true, sent: 0 };
   }
 
@@ -907,10 +935,7 @@ async function runSource({ key, label, scrape }, filters) {
   }
 
   const filteredWithFingerprint = filtered.map(t => ({ ...t, fingerprint: computeFingerprint(t) }));
-  saveCache(key, {
-    tenders: [...cache.tenders, ...filteredWithFingerprint].slice(-5000),
-    lastRun: new Date().toISOString(),
-  });
+  persistCache(filteredWithFingerprint);
 
   return { ok: true, sent: filtered.length };
 }
