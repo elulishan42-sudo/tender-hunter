@@ -343,7 +343,11 @@ async function scrapeListingPage(page, url) {
 
       const isFree = c.cardText.includes('FREE') || !c.cardText.includes('Buy Now');
 
-      results.push({ tenderId: c.tenderId, url: c.url, title, bidClosingDate, daysLeft, isFree });
+      // Canonical URL — strips any query strings or trailing path segments
+      // from c.url so the link in Telegram/TenderFlow always points exactly at
+      // the tender detail page.
+      const canonicalUrl = `https://tender.2merkato.com/tenders/${c.tenderId}`;
+      results.push({ tenderId: c.tenderId, url: canonicalUrl, title, bidClosingDate, daysLeft, isFree });
     }
 
     return results;
@@ -594,9 +598,18 @@ async function scrapeEgp(cache) {
         // Tendering / Auctioning / Prequalification all require auth, so we link to the
         // listing page where users can search by the tender_number we already include.
         const urlId = bid.sourceId || bid.id;
+        const refForHash = (bid.lotReferenceNo || bid.procurementReferenceNo || bid.id).trim();
+        // encodeURIComponent leaves parens unescaped, which breaks Telegram
+        // markdown link syntax [title](url). Force-escape them.
+        const hashRef = encodeURIComponent(refForHash).replace(/\(/g, '%28').replace(/\)/g, '%29');
         const sourceLink = sourceApp === 'purchasing'
           ? `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`
-          : 'https://production.egp.gov.et/egp/bids/all';
+          // Non-Purchasing detail pages require auth and hang for most users.
+          // Land on the listing page with the reference as a hash fragment so
+          // each tender has a UNIQUE source_link (avoids TenderFlow's
+          // duplicate_source_link rejection) and the user can search by the
+          // reference visible in the digest.
+          : `https://production.egp.gov.et/egp/bids/all#${hashRef}`;
 
         tenders.push({
           tenderId: tid,
