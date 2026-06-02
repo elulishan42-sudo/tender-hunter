@@ -793,9 +793,9 @@ No new tenders found today.
     return a.ms - b.ms;
   });
 
-  // Cap at 15 to stay comfortably under Telegram's 4096-char message limit
-  // given the richer per-tender block.
-  const MAX_TENDERS = 15;
+  // Cap at 20. Per-tender block is now 2 lines (~195 chars); 20 × 195 + headers ≈ 4100
+  // → comfortably under Telegram's 4096-char message limit with headroom for long titles.
+  const MAX_TENDERS = 20;
   const visible = sortable.slice(0, MAX_TENDERS).map(s => s.t);
   const overflow = tenders.length - visible.length;
 
@@ -826,24 +826,6 @@ No new tenders found today.
       if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
         msg += `\n  ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 50))}`;
       }
-
-      if (t.deadline) {
-        const deadline = new Date(t.deadline);
-        if (!isNaN(deadline)) {
-          const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
-          const dateStr = deadline.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-          let label;
-          if (daysLeft < 0) label = `closed ${Math.abs(daysLeft)}d ago`;
-          else if (daysLeft === 0) label = 'closes today';
-          else if (daysLeft === 1) label = 'closes tomorrow';
-          else label = `${daysLeft} days left`;
-          msg += `\n  📅 ${label} · ${dateStr}`;
-        }
-      }
-
-      const typeLabel = t.tenderType === 'import' ? '🌐 Import' : '🏠 Local';
-      const portal = t.sourcePortal || '2merkato';
-      msg += `\n  🏷 ${typeLabel} · ${portal}`;
     }
   }
 
