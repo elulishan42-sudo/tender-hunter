@@ -343,7 +343,7 @@ async function scrapeListingPage(page, url) {
 
       const isFree = c.cardText.includes('FREE') || !c.cardText.includes('Buy Now');
 
-      results.push({ tenderId: c.tenderId, url: c.url, title, bidClosingDate, daysLeft, isFree });
+      results.push({ tenderId: c.tenderId, url: c.url, title, bidClosingDate, daysLeft, isFree, cardText: c.cardText.substring(0, 400) });
     }
 
     return results;
@@ -491,6 +491,10 @@ async function scrapeMerkato(cache) {
       while (detailCursor < candidates.length) {
         const i = detailCursor++;
         const card = candidates[i];
+        if (i < 2) {
+          console.log(`  [DEBUG] candidate ${i}: daysLeft=${card.daysLeft} bidClosingDate=${JSON.stringify(card.bidClosingDate)}`);
+          console.log(`  [DEBUG] cardText (first 400ch): ${JSON.stringify(card.cardText)}`);
+        }
         processedIds.push(card.tenderId);
         let t;
         try {
