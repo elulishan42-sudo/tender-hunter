@@ -333,8 +333,8 @@ async function scrapeListingPage(page, url) {
     });
 
     // A "title-shaped" string isn't too short, isn't too long, and doesn't
-    // start with a known metadata prefix (the wrapper-link symptom).
-    const METADATA_PREFIX = /^(Bid\s*(closing|opening)|Closing\s*date|Opening\s*date|Published\b|FREE\b|Buy Now|View Detail|\d+\s*days?\s*left)/i;
+    // match known metadata patterns (wrapper-link symptom or timestamp link).
+    const METADATA_PREFIX = /^(Bid\s*(closing|opening)|Closing\s*date|Opening\s*date|Published\b|FREE\b|Buy Now|View Detail|Posted\b|\d+\s*days?\s*left|\d+\s*(minute|hour|day|week|month)s?\s*ago|an?\s+(minute|hour|day|week|month)\s+ago)/i;
     const isTitleShaped = (text) =>
       text.length >= 10 && text.length <= 300 && !METADATA_PREFIX.test(text);
 
@@ -348,14 +348,23 @@ async function scrapeListingPage(page, url) {
             if (isTitleShaped(t)) return t;
           }
         }
+        // 2) Scan all leaf elements inside the card (no element children → text-only
+        //    nodes). Pick the LONGEST title-shaped leaf. The actual title is
+        //    usually the most-substantial body text after dates and timestamps.
+        let bestLeaf = '';
+        card.querySelectorAll('div, span, p, label, h6, strong, b').forEach(el => {
+          if (el.children.length > 0) return;
+          const t = el.textContent.trim();
+          if (isTitleShaped(t) && t.length > bestLeaf.length) bestLeaf = t;
+        });
+        if (bestLeaf) return bestLeaf;
       }
-      // 2) Among link texts, pick the shortest that's title-shaped (longer ones
-      //    are usually wrapper links that concatenate metadata)
+      // 3) Among link texts, pick the shortest that's title-shaped
       const goodLinks = links.filter(l => isTitleShaped(l.text));
       if (goodLinks.length > 0) {
         return goodLinks.reduce((a, b) => a.text.length <= b.text.length ? a : b).text;
       }
-      // 3) Last resort: take the longest available text, trimmed
+      // 4) Last resort: take the longest available text
       const longest = links.reduce((a, b) => a.text.length >= b.text.length ? a : b, { text: '' });
       return longest.text || 'Untitled';
     }
@@ -367,7 +376,21 @@ async function scrapeListingPage(page, url) {
     }
 
     const results = [];
+    let debugDump = null; // one-shot diagnostic for first card
     for (const [tenderId, { card, cardText, links }] of linksByTender) {
+      if (!debugDump && card) {
+        const leafTexts = [];
+        card.querySelectorAll('div, span, p, label, h1, h2, h3, h4, h5, h6, strong, b').forEach(el => {
+          if (el.children.length === 0) {
+            const t = el.textContent.trim();
+            if (t.length >= 5) leafTexts.push({ tag: el.tagName, cls: (el.className || '').substring(0, 30), text: t.substring(0, 120) });
+          }
+        });
+        debugDump = {
+          leafs: leafTexts.slice(0, 15),
+          linkTexts: links.map(l => l.text.substring(0, 80)).slice(0, 5),
+        };
+      }
       const title = pickTitle(card, links);
       // (the actual link href is ignored — we use a canonical URL below)
       void pickUrl(links);
@@ -386,7 +409,7 @@ async function scrapeListingPage(page, url) {
       results.push({ tenderId, url: canonicalUrl, title, bidClosingDate, daysLeft, isFree });
     }
 
-    return results;
+    return { results, debug: debugDump };
   });
 }
 
@@ -488,7 +511,12 @@ async function scrapeMerkato(cache) {
       if (candidates.length >= MAX_TOTAL) { stoppedReason = `MAX_TOTAL (${MAX_TOTAL})`; break; }
 
       const url = `https://tender.2merkato.com/tenders?page=${pageNum}`;
-      const cards = await scrapeListingPage(listingPage, url);
+      const { results: cards, debug } = await scrapeListingPage(listingPage, url);
+      if (debug && pageNum === 1) {
+        console.log('  [DEBUG] First card leaf elements:');
+        for (const lf of debug.leafs) console.log(`    <${lf.tag.toLowerCase()} class="${lf.cls}">${JSON.stringify(lf.text)}</${lf.tag.toLowerCase()}>`);
+        console.log('  [DEBUG] First card link texts:', JSON.stringify(debug.linkTexts));
+      }
 
       if (cards.length === 0) { stoppedReason = 'empty page'; break; }
 
