@@ -583,6 +583,7 @@ async function scrapeEgp(cache) {
 
   const now = new Date();
   const tenders = [];
+  const processedIds = [];   // every uncached bid we evaluated this run — used so runSource caches dropped ones as skip-only entries, so they don't get re-walked next time
   let droppedOutOfWindow = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
   let pages = 0, skip = 0;
   let stoppedReason = `MAX_PAGES (${MAX_PAGES})`;
@@ -616,6 +617,7 @@ async function scrapeEgp(cache) {
 
         if (cachedIds.has(tid)) { alreadyCached++; continue; }
         newOnPage++; // counts ALL uncached bids (even ones we'll drop) so early-termination signal isn't masked
+        processedIds.push(tid);
 
         if (!isDeadlineInWindow(bid.submissionDeadline, now)) { droppedOutOfWindow++; continue; }
         if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
@@ -673,9 +675,12 @@ async function scrapeEgp(cache) {
     skip += pageBids;
   }
 
-  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window; ${alreadyCached} already cached).`);
-  // EGP has no detail-fetch step, so there's no "processed but dropped" set to cache.
-  return { tenders, processedIds: [] };
+  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window; ${alreadyCached} already cached; ${processedIds.length} processed this run).`);
+  // processedIds includes every uncached bid we evaluated — runSource caches the
+  // ones we didn't push as tenders (skip-only entries) so they don't get
+  // re-walked every 30 min. Without this, EGP keeps scanning all ~12 pages
+  // forever because out-of-window/excluded bids never make it into cache.
+  return { tenders, processedIds };
 }
 
 function filterTenders(tenders, filters, cache) {
