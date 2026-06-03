@@ -303,51 +303,87 @@ async function scrapeListingPage(page, url) {
   await page.waitForTimeout(500);
 
   return page.evaluate(() => {
-    // Pick the longest link text per tenderId. Listings often have multiple links
-    // to the same tender (title link, "view" button, etc.); the longest one is
-    // almost always the title. Avoids accidentally using "Read more" as a title.
-    const candidates = new Map();
-    const links = document.querySelectorAll('a[href*="/tenders/"]');
-
-    links.forEach(a => {
+    // Listings can have multiple <a> tags per tender (title link, "view"
+    // button, sometimes a wrapper around the whole card). The whole-card
+    // wrapper gives a textContent that mashes metadata + title together
+    // like "Bid closing date:Jun 09, 2026...Procurement of X". To avoid
+    // picking that garbage, we collect ALL links per tenderId and then
+    // pick the best title via a small heuristic.
+    const linksByTender = new Map();
+    document.querySelectorAll('a[href*="/tenders/"]').forEach(a => {
       const href = a.href;
-      // Permissive: accept trailing slash, query, hash, or end of URL
       const match = href.match(/\/tenders\/([a-z0-9]+)(?:[/?#]|$)/);
       if (!match) return;
       const tenderId = match[1];
       // Skip non-tender paths like /tenders/popular or /tenders/recent
       if (tenderId.length < 10) return;
 
-      const text = (a.textContent || '').trim();
-      const existing = candidates.get(tenderId);
-      if (!existing || text.length > existing.text.length) {
+      if (!linksByTender.has(tenderId)) {
         const card = a.closest('[class*="card"], [class*="item"], article, [class*="bg-white"]') || a.parentElement;
-        candidates.set(tenderId, {
-          tenderId,
-          url: href,
-          text,
+        linksByTender.set(tenderId, {
+          card,
           cardText: card ? card.textContent : '',
+          links: [],
         });
       }
+      linksByTender.get(tenderId).links.push({
+        url: href,
+        text: (a.textContent || '').trim(),
+      });
     });
 
-    const results = [];
-    for (const c of candidates.values()) {
-      const title = (c.text || 'Untitled').substring(0, 100);
+    // A "title-shaped" string isn't too short, isn't too long, and doesn't
+    // start with a known metadata prefix (the wrapper-link symptom).
+    const METADATA_PREFIX = /^(Bid\s*(closing|opening)|Closing\s*date|Opening\s*date|Published\b|FREE\b|Buy Now|View Detail|\d+\s*days?\s*left)/i;
+    const isTitleShaped = (text) =>
+      text.length >= 10 && text.length <= 300 && !METADATA_PREFIX.test(text);
 
-      const closeMatch = c.cardText.match(/Bid closing date[:\s]*([A-Za-z]{3}\s+\d+,\s+\d{4})/i);
+    function pickTitle(card, links) {
+      // 1) Prefer a heading element inside the card
+      if (card) {
+        for (const sel of ['h1', 'h2', 'h3', 'h4', 'h5', '[class*="title"]', '[class*="subject"]']) {
+          const el = card.querySelector(sel);
+          if (el) {
+            const t = el.textContent.trim();
+            if (isTitleShaped(t)) return t;
+          }
+        }
+      }
+      // 2) Among link texts, pick the shortest that's title-shaped (longer ones
+      //    are usually wrapper links that concatenate metadata)
+      const goodLinks = links.filter(l => isTitleShaped(l.text));
+      if (goodLinks.length > 0) {
+        return goodLinks.reduce((a, b) => a.text.length <= b.text.length ? a : b).text;
+      }
+      // 3) Last resort: take the longest available text, trimmed
+      const longest = links.reduce((a, b) => a.text.length >= b.text.length ? a : b, { text: '' });
+      return longest.text || 'Untitled';
+    }
+
+    function pickUrl(links) {
+      // The link whose text matches our chosen title is ideal, but for simplicity
+      // we use the first link's url — they all point at the same tenderId anyway.
+      return links[0] ? links[0].url : '';
+    }
+
+    const results = [];
+    for (const [tenderId, { card, cardText, links }] of linksByTender) {
+      const title = pickTitle(card, links);
+      // (the actual link href is ignored — we use a canonical URL below)
+      void pickUrl(links);
+
+      const closeMatch = cardText.match(/Bid closing date[:\s]*([A-Za-z]{3}\s+\d+,\s+\d{4})/i);
       const bidClosingDate = closeMatch ? closeMatch[1].trim() : '';
 
-      const daysMatch = c.cardText.match(/(\d+)\s*days?\s*left/i);
+      const daysMatch = cardText.match(/(\d+)\s*days?\s*left/i);
       const daysLeft = daysMatch ? parseInt(daysMatch[1]) : null;
 
-      const isFree = c.cardText.includes('FREE') || !c.cardText.includes('Buy Now');
+      const isFree = cardText.includes('FREE') || !cardText.includes('Buy Now');
 
-      // Canonical URL — strips any query strings or trailing path segments
-      // from c.url so the link in Telegram/TenderFlow always points exactly at
-      // the tender detail page.
-      const canonicalUrl = `https://tender.2merkato.com/tenders/${c.tenderId}`;
-      results.push({ tenderId: c.tenderId, url: canonicalUrl, title, bidClosingDate, daysLeft, isFree });
+      // Canonical URL — always points exactly at the tender detail page,
+      // independent of whatever the listing card linked to.
+      const canonicalUrl = `https://tender.2merkato.com/tenders/${tenderId}`;
+      results.push({ tenderId, url: canonicalUrl, title, bidClosingDate, daysLeft, isFree });
     }
 
     return results;
@@ -828,19 +864,19 @@ No new tenders found today.
     return a.ms - b.ms;
   });
 
-  // Cap at 20. Per-tender block is now 2 lines (~195 chars); 20 × 195 + headers ≈ 4100
-  // → comfortably under Telegram's 4096-char message limit with headroom for long titles.
-  const MAX_TENDERS = 20;
-  const visible = sortable.slice(0, MAX_TENDERS).map(s => s.t);
-  const overflow = tenders.length - visible.length;
+  // Pack tenders dynamically — keep their titles FULL (no per-tender truncation)
+  // and stop adding once we'd push the message past Telegram's 4096-char limit.
+  // Reserve ~200 chars of headroom for header, separators, and the footer.
+  const TELEGRAM_LIMIT = 4096;
+  const FOOTER_RESERVE = 200;
 
-  // Group visible tenders by category (sort is stable, so within-category order
-  // is still soonest-deadline-first).
+  // Group ALL sorted tenders by category; we'll iterate in sorted order so the
+  // per-category sub-arrays stay soonest-deadline-first.
   const byCategory = {};
-  visible.forEach(t => {
-    if (!byCategory[t.category]) byCategory[t.category] = [];
-    byCategory[t.category].push(t);
-  });
+  for (const s of sortable) {
+    if (!byCategory[s.t.category]) byCategory[s.t.category] = [];
+    byCategory[s.t.category].push(s.t);
+  }
 
   const categoryCount = Object.keys(byCategory).length;
 
@@ -849,21 +885,29 @@ No new tenders found today.
   msg += ` · ${categoryCount} categor${categoryCount === 1 ? 'y' : 'ies'}`;
   msg += `\n━━━━━━━━━━━━━━━━━━━━`;
 
+  let included = 0;
+  let stopped = false;
   for (const [cat, catTenders] of Object.entries(byCategory)) {
+    if (stopped) break;
     const emoji = CATEGORY_EMOJI[cat] || '📋';
-    msg += `\n\n${emoji} *${cat}* (${catTenders.length})`;
+    const catHeader = `\n\n${emoji} *${cat}* (${catTenders.length})`;
+    if (msg.length + catHeader.length + FOOTER_RESERVE > TELEGRAM_LIMIT) { stopped = true; break; }
+    msg += catHeader;
 
     for (const t of catTenders) {
-      const rawTitle = (t.title || 'Untitled').substring(0, 80);
-      const title = escapeTelegramMarkdown(rawTitle) + ((t.title || '').length > 80 ? '…' : '');
-      msg += `\n\n▸ [${title}](${t.url})`;
-
+      // Full title — escape markdown specials, no length truncation.
+      const title = escapeTelegramMarkdown(t.title || 'Untitled');
+      let block = `\n\n▸ [${title}](${t.url})`;
       if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
-        msg += `\n  ${escapeTelegramMarkdown(t.publishingEntity.substring(0, 50))}`;
+        block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
       }
+      if (msg.length + block.length + FOOTER_RESERVE > TELEGRAM_LIMIT) { stopped = true; break; }
+      msg += block;
+      included++;
     }
   }
 
+  const overflow = tenders.length - included;
   msg += `\n\n━━━━━━━━━━━━━━━━━━━━`;
   if (overflow > 0) {
     msg += `\n+${overflow} more in dashboard`;
