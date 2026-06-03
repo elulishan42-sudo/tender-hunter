@@ -395,10 +395,25 @@ async function scrapeListingPage(page, url) {
 
       const isFree = cardText.includes('FREE') || !cardText.includes('Buy Now');
 
+      // Posted-time: parse "Posted N <unit> ago" / "Posted a minute ago" from the
+      // card text and convert to an absolute ISO timestamp. The digest re-computes
+      // the relative phrase at send time so it stays accurate even with a small
+      // gap between scrape and send.
+      let postedAt = null;
+      const postedMatch = cardText.match(/Posted\s+(an?|\d+)\s+(minute|hour|day|week|month)s?\s+ago/i);
+      if (postedMatch) {
+        const n = /^an?$/i.test(postedMatch[1]) ? 1 : parseInt(postedMatch[1]);
+        const unit = postedMatch[2].toLowerCase();
+        const unitMs = { minute: 60000, hour: 3600000, day: 86400000, week: 604800000, month: 2592000000 }[unit];
+        if (unitMs) postedAt = new Date(Date.now() - n * unitMs).toISOString();
+      } else if (/Posted\s+just\s+now/i.test(cardText)) {
+        postedAt = new Date().toISOString();
+      }
+
       // Canonical URL — always points exactly at the tender detail page,
       // independent of whatever the listing card linked to.
       const canonicalUrl = `https://tender.2merkato.com/tenders/${tenderId}`;
-      results.push({ tenderId, url: canonicalUrl, title, bidClosingDate, daysLeft, isFree });
+      results.push({ tenderId, url: canonicalUrl, title, bidClosingDate, daysLeft, isFree, postedAt });
     }
 
     return results;
@@ -446,6 +461,7 @@ function buildMerkatoTender(card, details) {
     tenderType: details.tenderType || 'local',
     notes: details.notes || '',
     sourcePortal: '2merkato',
+    postedAt: card.postedAt || null,
   };
 }
 
@@ -678,6 +694,7 @@ async function scrapeEgp(cache) {
           tenderType: bid.marketPlace === 'International' ? 'import' : 'local',
           notes: (bid.lotDescription || '').substring(0, 200).trim(),
           sourcePortal: 'egp',
+          postedAt: bid.invitationDate || bid.timestamp || null,
         });
       }
     }
@@ -858,6 +875,26 @@ const CATEGORY_EMOJI = {
   'Other': '📋',
 };
 
+// Turn an absolute timestamp into a short relative phrase. Returns null if
+// the timestamp is missing/unparseable, or older than ~1 year (not useful).
+function formatPostedAgo(isoTimestamp, now) {
+  if (!isoTimestamp) return null;
+  const t = new Date(isoTimestamp);
+  if (isNaN(t)) return null;
+  const ms = now - t;
+  if (ms < 0) return null;
+  if (ms < 60_000) return 'just now';
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(ms / 86_400_000);
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
+  return null;
+}
+
 function formatDigest(tenders, sourceLabel) {
   const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   const header = sourceLabel ? `📋 ${sourceLabel.toUpperCase()} DIGEST — ${today}` : `📋 TENDER DIGEST — ${today}`;
@@ -920,6 +957,10 @@ No new tenders found today.
       let block = `\n\n▸ [${title}](${t.url})`;
       if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
         block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
+      }
+      const ago = formatPostedAgo(t.postedAt, now);
+      if (ago) {
+        block += `\n  Posted ${ago}`;
       }
       if (msg.length + block.length + FOOTER_RESERVE > TELEGRAM_LIMIT) { stopped = true; break; }
       msg += block;
