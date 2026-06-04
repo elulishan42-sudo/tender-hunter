@@ -1,11 +1,13 @@
 name: Tender Hunter
 on:
   schedule:
-    # Public repo → unlimited Actions minutes + minimal cron throttling.
-    # Three runs per hour at off-peak minutes (avoiding 0/15/30/45 high-load slots).
-    - cron: '7 * * * *'
-    - cron: '27 * * * *'
-    - cron: '47 * * * *'
+    # Active hours only — sources don't post new tenders after 7pm Addis
+    # (UTC+3). 03:00-17:00 UTC ≈ 06:00-20:00 Addis (with 1h buffer past 7pm
+    # for late stragglers). Three runs per hour at off-peak minutes
+    # (avoiding GitHub's high-load 0/15/30/45 slots).
+    - cron: '7 3-17 * * *'
+    - cron: '27 3-17 * * *'
+    - cron: '47 3-17 * * *'
   workflow_dispatch:
 
 # Skip overlapping runs — if a previous run is still going (unlikely, but
