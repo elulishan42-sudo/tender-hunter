@@ -1,13 +1,11 @@
 name: Tender Hunter
 on:
   schedule:
-    # GitHub Actions heavily throttles scheduled runs at 0/15/30/45 (high-load
-    # slots). Off-peak minutes get scheduled more reliably. Four attempts/hour
-    # so even if half get skipped we get ≥1 run per ~30 min.
+    # Public repo → unlimited Actions minutes + minimal cron throttling.
+    # Three runs per hour at off-peak minutes (avoiding 0/15/30/45 high-load slots).
     - cron: '7 * * * *'
-    - cron: '22 * * * *'
-    - cron: '37 * * * *'
-    - cron: '52 * * * *'
+    - cron: '27 * * * *'
+    - cron: '47 * * * *'
   workflow_dispatch:
 
 # Skip overlapping runs — if a previous run is still going (unlikely, but
