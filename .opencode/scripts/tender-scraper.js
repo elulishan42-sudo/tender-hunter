@@ -59,7 +59,14 @@ const EXCLUDE_PATTERNS = [
   /\brenovation\b/i,
   /\brehabilitation\b/i,
   /\bcivil works?\b/i,
-  /\bservices?\b/i,
+  // Bare /\bservices?\b/ was too aggressive — it killed every Merkato card
+  // mentioning the word (cleaning services, office services, etc.) even
+  // when they were product procurements. Narrow to phrases that clearly
+  // mean a service contract.
+  /\bprovision\s+of\s+(?:\w+\s+){0,3}services?\b/i,
+  /\bservice\s+(contract|provision|agreement)\b/i,
+  /\b(audit|training|advisory|legal|financial|maintenance)\s+services?\b/i,
+  /\boutsourc(ing|ed)\b/i,
 ];
 
 function isExcluded(text) {
@@ -375,17 +382,9 @@ async function scrapeListingPage(page, url) {
       return longest.text || 'Untitled';
     }
 
-    function pickUrl(links) {
-      // The link whose text matches our chosen title is ideal, but for simplicity
-      // we use the first link's url — they all point at the same tenderId anyway.
-      return links[0] ? links[0].url : '';
-    }
-
     const results = [];
     for (const [tenderId, { card, cardText, links }] of linksByTender) {
       const title = pickTitle(card, links);
-      // (the actual link href is ignored — we use a canonical URL below)
-      void pickUrl(links);
 
       const closeMatch = cardText.match(/Bid closing date[:\s]*([A-Za-z]{3}\s+\d+,\s+\d{4})/i);
       const bidClosingDate = closeMatch ? closeMatch[1].trim() : '';
@@ -408,7 +407,7 @@ async function scrapeListingPage(page, url) {
         const unit = postedMatch[2].toLowerCase();
         const unitMs = { minute: 60000, hour: 3600000, day: 86400000, week: 604800000, month: 2592000000 }[unit];
         if (unitMs) postedAt = new Date(Date.now() - n * unitMs).toISOString();
-      } else if (/Posted\s+just\s+now/i.test(searchText)) {
+      } else if (/Posted\s+(just\s+)?now\b/i.test(searchText)) {
         postedAt = new Date().toISOString();
       }
 
@@ -736,22 +735,18 @@ async function scrapeEgp(cache) {
   return { tenders, processedIds };
 }
 
-function filterTenders(tenders, filters, cache) {
+function filterTenders(tenders, cache) {
+  // Single job left: drop tenders we've already sent (by tenderId or by
+  // matching fingerprint — same name+entity+deadline_date posted on a
+  // different portal or under a re-issued ID). Window/cost/status filters
+  // are handled upstream in the scrapers, so this stays minimal.
   const cachedIds = new Set(cache.tenders.map(t => t.tenderId));
   const cachedFingerprints = new Set(cache.tenders.map(t => t.fingerprint).filter(Boolean));
 
   return tenders.filter(t => {
-    if (filters.freshness === 'new') {
-      if (cachedIds.has(t.tenderId)) return false;
-      const fp = computeFingerprint(t);
-      if (fp && cachedFingerprints.has(fp)) return false;
-    }
-    if (filters.cost === 'free' && !t.isFree) return false;
-    // daysLeft is null when unknown — don't filter out tenders with unknown deadlines
-    if (filters.status === 'open' && t.daysLeft !== null && t.daysLeft <= 0) return false;
-    if (filters.deadline === '7days' && t.daysLeft !== null && t.daysLeft > 7) return false;
-    if (filters.deadline === '14days' && t.daysLeft !== null && t.daysLeft > 14) return false;
-    if (filters.deadline === '30days' && t.daysLeft !== null && t.daysLeft > 30) return false;
+    if (cachedIds.has(t.tenderId)) return false;
+    const fp = computeFingerprint(t);
+    if (fp && cachedFingerprints.has(fp)) return false;
     return true;
   });
 }
@@ -883,19 +878,6 @@ function escapeTelegramMarkdown(text) {
   return text.replace(/([*_`\[\]])/g, '\\$1');
 }
 
-const CATEGORY_EMOJI = {
-  'Lab & Chemicals': '🔬',
-  'Education & Stationery': '📚',
-  'Vet & Agri': '🌾',
-  'Medical': '🏥',
-  'Electronics & IT': '💻',
-  'Car & Auto': '🚗',
-  'Cleaning & Janitorial': '🧹',
-  'Food & Institutional': '🍽',
-  'General': '📋',
-  'Other': '📋',
-};
-
 // Turn an absolute timestamp into a short relative phrase. Returns null if
 // the timestamp is missing/unparseable, or older than ~1 year (not useful).
 function formatPostedAgo(isoTimestamp, now) {
@@ -1004,7 +986,7 @@ const SOURCES = [
   { key: 'egp',     label: 'EGP',      scrape: scrapeEgp },
 ];
 
-async function runSource({ key, label, scrape }, filters) {
+async function runSource({ key, label, scrape }) {
   console.log(`\n--- ${label} ---`);
   const cache = loadCache(key);
 
@@ -1028,7 +1010,10 @@ async function runSource({ key, label, scrape }, filters) {
 
   const persistCache = (extras) => {
     saveCache(key, {
-      tenders: [...cache.tenders, ...skipOnlyEntries, ...extras].slice(-5000),
+      // 10k cap: EGP alone runs ~650 entries + skip-only; raising the cap
+      // means cards don't roll out of cache so fast that they re-appear as
+      // "new" days later. ~1 MB per source — still trivial.
+      tenders: [...cache.tenders, ...skipOnlyEntries, ...extras].slice(-10000),
       lastRun: new Date().toISOString(),
     });
   };
@@ -1040,7 +1025,7 @@ async function runSource({ key, label, scrape }, filters) {
     return { ok: true, sent: 0 };
   }
 
-  const filtered = filterTenders(tenders, filters, cache);
+  const filtered = filterTenders(tenders, cache);
   console.log(`${label}: ${filtered.length} new after fingerprint filter`);
 
   if (filtered.length === 0) {
@@ -1068,12 +1053,12 @@ async function runSource({ key, label, scrape }, filters) {
 
 async function main() {
   console.log(`=== Tender Hunter — combined run @ ${new Date().toISOString()} ===`);
-  const filters = loadConfig();
+  loadConfig();
 
   let anyOk = false;
   let totalSent = 0;
   for (const source of SOURCES) {
-    const result = await runSource(source, filters);
+    const result = await runSource(source);
     if (result.ok) {
       anyOk = true;
       totalSent += result.sent || 0;
