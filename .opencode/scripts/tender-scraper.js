@@ -395,18 +395,20 @@ async function scrapeListingPage(page, url) {
 
       const isFree = cardText.includes('FREE') || !cardText.includes('Buy Now');
 
-      // Posted-time: parse "Posted N <unit> ago" / "Posted a minute ago" from the
-      // card text and convert to an absolute ISO timestamp. The digest re-computes
-      // the relative phrase at send time so it stays accurate even with a small
-      // gap between scrape and send.
+      // Posted-time: parse "Posted N <unit> ago" / "Posted a minute ago" from
+      // the card. Search cardText AND every link text to be robust against any
+      // DOM layout where the timestamp link sits outside the card boundary that
+      // closest() picks up. The digest re-computes the relative phrase at send
+      // time so it stays accurate.
+      const searchText = cardText + ' ' + links.map(l => l.text).join(' ');
       let postedAt = null;
-      const postedMatch = cardText.match(/Posted\s+(an?|\d+)\s+(minute|hour|day|week|month)s?\s+ago/i);
+      const postedMatch = searchText.match(/Posted\s+(an?|\d+)\s+(minute|hour|day|week|month)s?\s+ago/i);
       if (postedMatch) {
         const n = /^an?$/i.test(postedMatch[1]) ? 1 : parseInt(postedMatch[1]);
         const unit = postedMatch[2].toLowerCase();
         const unitMs = { minute: 60000, hour: 3600000, day: 86400000, week: 604800000, month: 2592000000 }[unit];
         if (unitMs) postedAt = new Date(Date.now() - n * unitMs).toISOString();
-      } else if (/Posted\s+just\s+now/i.test(cardText)) {
+      } else if (/Posted\s+just\s+now/i.test(searchText)) {
         postedAt = new Date().toISOString();
       }
 
@@ -418,6 +420,17 @@ async function scrapeListingPage(page, url) {
 
     return results;
   });
+}
+
+// Extract the publishing entity from a 2Merkato title. The titles follow a
+// predictable pattern: "<entity name> <verb phrase> <object>". This pulls the
+// entity by looking for the first known verb phrase boundary.
+function entityFromMerkatoTitle(title) {
+  if (!title) return null;
+  // English boundary verbs / phrases. "in tends" is a typo seen in real listings.
+  const m = title.match(/^(.{5,150}?)\s+(?:invites?|invited|would\s+like|intends?|in\s*tends?|is\s+looking|wishes?|seeks?|requires?|wants?|requests?|plans?|needs?|aims?|hires?|calls?|solicits?|announces?|will\s+sell|to\s+sell|to\s+procure|to\s+purchase|to\s+buy)\b/i);
+  if (m) return m[1].trim();
+  return null;
 }
 
 // Build a tender object from a listing card + (optionally) detail-page output.
@@ -447,12 +460,20 @@ function buildMerkatoTender(card, details) {
   const text = `${card.title || ''} ${details.notes || ''}`;
   const category = matchCategory(text) || 'General';
 
+  // Entity: prefer detail-page extraction; fall back to parsing the title.
+  // The detail-page regex misses on Vue SPA pages and Amharic content, so the
+  // title fallback covers English-pattern titles ("Entity invites bids...").
+  let publishingEntity = details.publishingEntity || '';
+  if (!publishingEntity || publishingEntity === 'Unknown') {
+    publishingEntity = entityFromMerkatoTitle(card.title) || 'Unknown';
+  }
+
   return {
     tenderId: card.tenderId,
     url: card.url,
     title: card.title,
     tenderNumber: details.tenderNumber || '',
-    publishingEntity: details.publishingEntity || 'Unknown',
+    publishingEntity,
     deadline: isoDeadline,
     daysLeft: card.daysLeft,
     isFree: card.isFree,
@@ -909,63 +930,41 @@ No new tenders found today.
 ✅ Sent to TenderFlow`;
   }
 
-  // Sort by soonest deadline first; tenders without valid future deadlines go last.
+  // Sort by NEWNESS — most recently posted first. Tenders without a postedAt
+  // timestamp fall to the end (we couldn't determine when they were posted).
   const now = new Date();
-  const nowMs = now.getTime();
   const sortable = tenders.map(t => {
-    const ms = t.deadline ? new Date(t.deadline).getTime() : NaN;
-    return { t, ms, valid: !isNaN(ms) && ms >= nowMs };
+    const ms = t.postedAt ? new Date(t.postedAt).getTime() : NaN;
+    return { t, ms, valid: !isNaN(ms) };
   });
   sortable.sort((a, b) => {
     if (a.valid !== b.valid) return a.valid ? -1 : 1;
-    return a.ms - b.ms;
+    return b.ms - a.ms; // descending: newest first
   });
 
-  // Pack tenders dynamically — keep their titles FULL (no per-tender truncation)
-  // and stop adding once we'd push the message past Telegram's 4096-char limit.
-  // Reserve ~200 chars of headroom for header, separators, and the footer.
+  // Pack tenders dynamically — full titles, stop adding once we'd push past
+  // Telegram's 4096-char limit. Reserve ~200 chars for header + footer.
   const TELEGRAM_LIMIT = 4096;
   const FOOTER_RESERVE = 200;
 
-  // Group ALL sorted tenders by category; we'll iterate in sorted order so the
-  // per-category sub-arrays stay soonest-deadline-first.
-  const byCategory = {};
-  for (const s of sortable) {
-    if (!byCategory[s.t.category]) byCategory[s.t.category] = [];
-    byCategory[s.t.category].push(s.t);
-  }
-
-  const categoryCount = Object.keys(byCategory).length;
-
   let msg = `${header}\n`;
   msg += `${tenders.length} new tender${tenders.length === 1 ? '' : 's'}`;
-  msg += ` · ${categoryCount} categor${categoryCount === 1 ? 'y' : 'ies'}`;
   msg += `\n━━━━━━━━━━━━━━━━━━━━`;
 
   let included = 0;
-  let stopped = false;
-  for (const [cat, catTenders] of Object.entries(byCategory)) {
-    if (stopped) break;
-    const emoji = CATEGORY_EMOJI[cat] || '📋';
-    const catHeader = `\n\n${emoji} *${cat}* (${catTenders.length})`;
-    if (msg.length + catHeader.length + FOOTER_RESERVE > TELEGRAM_LIMIT) { stopped = true; break; }
-    msg += catHeader;
-
-    for (const t of catTenders) {
-      // Full title — escape markdown specials, no length truncation.
-      const title = escapeTelegramMarkdown(t.title || 'Untitled');
-      let block = `\n\n▸ [${title}](${t.url})`;
-      if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
-        block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
-      }
-      const ago = formatPostedAgo(t.postedAt, now);
-      if (ago) {
-        block += `\n  Posted ${ago}`;
-      }
-      if (msg.length + block.length + FOOTER_RESERVE > TELEGRAM_LIMIT) { stopped = true; break; }
-      msg += block;
-      included++;
+  for (const { t } of sortable) {
+    const title = escapeTelegramMarkdown(t.title || 'Untitled');
+    let block = `\n\n▸ [${title}](${t.url})`;
+    if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
+      block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
     }
+    const ago = formatPostedAgo(t.postedAt, now);
+    if (ago) {
+      block += `\n  Posted ${ago}`;
+    }
+    if (msg.length + block.length + FOOTER_RESERVE > TELEGRAM_LIMIT) break;
+    msg += block;
+    included++;
   }
 
   const overflow = tenders.length - included;

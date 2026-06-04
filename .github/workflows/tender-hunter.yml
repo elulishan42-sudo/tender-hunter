@@ -1,7 +1,13 @@
 name: Tender Hunter
 on:
   schedule:
-    - cron: '*/30 * * * *' # every 30 minutes
+    # GitHub Actions heavily throttles scheduled runs at 0/15/30/45 (high-load
+    # slots). Off-peak minutes get scheduled more reliably. Four attempts/hour
+    # so even if half get skipped we get ≥1 run per ~30 min.
+    - cron: '7 * * * *'
+    - cron: '22 * * * *'
+    - cron: '37 * * * *'
+    - cron: '52 * * * *'
   workflow_dispatch:
 
 # Skip overlapping runs — if a previous run is still going (unlikely, but
