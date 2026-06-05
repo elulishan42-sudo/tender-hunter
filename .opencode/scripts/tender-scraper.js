@@ -549,8 +549,9 @@ async function scrapeMerkato(cache) {
 
     // Phase 1: sequential listing pagination with early termination
     const candidates = [];                          // cards that survived pre-filters and need detail-fetch
+    const processedIds = [];                        // accepted or permanently dropped cards that are safe to cache
     const seenIds = new Set();
-    let droppedExcluded = 0, droppedOutOfWindow = 0, alreadyCached = 0;
+    let droppedExcluded = 0, droppedOutOfWindow = 0, deferredTooFarByDaysLeft = 0, alreadyCached = 0;
     let stoppedReason = `hit MAX_PAGES (${MAX_PAGES})`;
 
     for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
@@ -569,8 +570,24 @@ async function scrapeMerkato(cache) {
         if (cachedIds.has(c.tenderId)) { alreadyCached++; continue; }
         newOnPage++; // counts ALL uncached cards (even ones we'll drop) so the early-termination signal isn't masked by keyword/window filters
 
-        if (isExcluded(c.title)) { droppedExcluded++; continue; }
-        if (c.daysLeft != null && (c.daysLeft <= 2 || c.daysLeft >= 30)) { droppedOutOfWindow++; continue; }
+        if (isExcluded(c.title)) {
+          droppedExcluded++;
+          processedIds.push(c.tenderId);
+          continue;
+        }
+        if (c.daysLeft != null) {
+          if (c.daysLeft <= 2) {
+            droppedOutOfWindow++;
+            processedIds.push(c.tenderId);
+            continue;
+          }
+          if (c.daysLeft >= 30) {
+            // Keep future tenders out of cache so they can enter the 30-day
+            // window later and still be notified.
+            deferredTooFarByDaysLeft++;
+            continue;
+          }
+        }
 
         candidates.push(c);
       }
@@ -581,12 +598,12 @@ async function scrapeMerkato(cache) {
       if (newOnPage === 0) { stoppedReason = 'caught up'; break; }
     }
 
-    console.log(`  Listing done — ${stoppedReason}. Pre-filter dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window by daysLeft; ${alreadyCached} cards already cached.`);
+    console.log(`  Listing done — ${stoppedReason}. Pre-filter dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} permanent out-of-window by daysLeft; deferred ${deferredTooFarByDaysLeft} too-far; ${alreadyCached} cards already cached.`);
 
     if (candidates.length === 0) {
       console.log('  No new tenders to fetch details for');
       await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
-      return { tenders: [], processedIds: [] };
+      return { tenders: [], processedIds };
     }
 
     console.log(`  Fetching details for ${candidates.length} new candidates (concurrency ${DETAIL_CONCURRENCY})`);
@@ -595,7 +612,6 @@ async function scrapeMerkato(cache) {
     // produce a tender with listing-only data — never silently lose one.
     let detailCursor = 0;
     let droppedPostDetail = 0, deferredTooFar = 0;
-    const processedIds = [];   // candidates that are safe to cache as skip-only if not accepted
     const fetchDetail = async (page) => {
       while (detailCursor < candidates.length) {
         const i = detailCursor++;
