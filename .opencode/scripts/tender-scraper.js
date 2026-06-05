@@ -86,6 +86,17 @@ function isDeadlineInWindow(deadlineLike, now) {
   return true;
 }
 
+function deadlineWindowStatus(deadlineLike, now) {
+  if (!deadlineLike) return 'invalid';
+  const d = deadlineLike instanceof Date ? deadlineLike : new Date(deadlineLike);
+  if (isNaN(d)) return 'invalid';
+  if (d.getFullYear() !== now.getFullYear()) return 'wrong-year';
+  const days = (d - now) / ONE_DAY_MS;
+  if (days <= 2) return 'too-soon';
+  if (days >= 30) return 'too-far';
+  return 'in-window';
+}
+
 let config = {
   telegram: { botToken: '', userId: '' },
   merkato: { email: '', password: '' },
@@ -155,6 +166,13 @@ function saveCache(source, cache) {
   cache.lastRun = new Date().toISOString();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(cache, null, 2));
+}
+
+function isCacheHitEntry(entry) {
+  // Older caches stored every skip-only ID as { fingerprint: null }, including
+  // future tenders that should later become eligible. Ignore those legacy
+  // unmarked skips once; new permanent skips are explicitly marked below.
+  return !!entry.fingerprint || entry.skipReason === 'permanent';
 }
 
 async function fetchWithRetry(url, options, retries = 2) {
@@ -496,7 +514,7 @@ async function scrapeMerkato(cache) {
                                     // case: new posts arrive every 30 min, not bulk backfill.
                                     // Each subsequent run picks up new posts within the cache window.
   const DETAIL_CONCURRENCY = 10;
-  const cachedIds = new Set((cache?.tenders || []).map(t => t.tenderId));
+  const cachedIds = new Set((cache?.tenders || []).filter(isCacheHitEntry).map(t => t.tenderId));
 
   const browser = await chromium.launch({
     headless: true,
@@ -576,13 +594,12 @@ async function scrapeMerkato(cache) {
     // Phase 2: parallel detail fetches via worker pool. Failed details still
     // produce a tender with listing-only data — never silently lose one.
     let detailCursor = 0;
-    let droppedPostDetail = 0;
-    const processedIds = [];   // every candidate we detail-fetched, so the caller can cache them
+    let droppedPostDetail = 0, deferredTooFar = 0;
+    const processedIds = [];   // candidates that are safe to cache as skip-only if not accepted
     const fetchDetail = async (page) => {
       while (detailCursor < candidates.length) {
         const i = detailCursor++;
         const card = candidates[i];
-        processedIds.push(card.tenderId);
         let t;
         try {
           const details = await getTenderDetails(page, card.url);
@@ -600,10 +617,17 @@ async function scrapeMerkato(cache) {
           t.deadline = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
           t.deadlineEstimated = true;
         }
-        if (isDeadlineInWindow(t.deadline, now)) {
+        const deadlineStatus = deadlineWindowStatus(t.deadline, now);
+        if (deadlineStatus === 'in-window') {
           tenders.push(t);
+          processedIds.push(card.tenderId);
+        } else if (deadlineStatus === 'too-far') {
+          // Do not cache future tenders that are outside the 30-day window yet.
+          // They should be reconsidered later as the deadline approaches.
+          deferredTooFar++;
         } else {
           droppedPostDetail++;
+          processedIds.push(card.tenderId);
         }
         await page.waitForTimeout(150);
       }
@@ -611,7 +635,9 @@ async function scrapeMerkato(cache) {
 
     await Promise.all(detailPages.map(p => fetchDetail(p)));
 
-    const droppedSuffix = droppedPostDetail > 0 ? ` (dropped ${droppedPostDetail} out-of-window after detail)` : '';
+    const droppedSuffix = droppedPostDetail > 0 || deferredTooFar > 0
+      ? ` (dropped ${droppedPostDetail} permanent out-of-window after detail; deferred ${deferredTooFar} too-far)`
+      : '';
     console.log(`  2Merkato: got ${tenders.length} tenders${droppedSuffix}`);
 
     await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
@@ -628,14 +654,14 @@ async function scrapeEgp(cache) {
   // beyond is older and already in cache.
   const TOP = 100;
   const MAX_PAGES = 50; // cold-start safety cap (~5000 bids)
-  const cachedIds = new Set((cache?.tenders || []).map(t => t.tenderId));
+  const cachedIds = new Set((cache?.tenders || []).filter(isCacheHitEntry).map(t => t.tenderId));
 
   console.log(`Fetching EGP listings (incremental; ${cachedIds.size} cached IDs)...`);
 
   const now = new Date();
   const tenders = [];
-  const processedIds = [];   // every uncached bid we evaluated this run — used so runSource caches dropped ones as skip-only entries, so they don't get re-walked next time
-  let droppedOutOfWindow = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
+  const processedIds = [];   // accepted or permanently dropped bids that are safe to cache
+  let droppedOutOfWindow = 0, deferredTooFar = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
   let pages = 0, skip = 0;
   let stoppedReason = `MAX_PAGES (${MAX_PAGES})`;
 
@@ -668,12 +694,22 @@ async function scrapeEgp(cache) {
 
         if (cachedIds.has(tid)) { alreadyCached++; continue; }
         newOnPage++; // counts ALL uncached bids (even ones we'll drop) so early-termination signal isn't masked
-        processedIds.push(tid);
 
-        if (!isDeadlineInWindow(bid.submissionDeadline, now)) { droppedOutOfWindow++; continue; }
-        if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; continue; }
+        const deadlineStatus = deadlineWindowStatus(bid.submissionDeadline, now);
+        if (deadlineStatus !== 'in-window') {
+          if (deadlineStatus === 'too-far') {
+            // Keep future tenders out of cache so they can enter the 30-day
+            // window later and still be notified.
+            deferredTooFar++;
+          } else {
+            droppedOutOfWindow++;
+            processedIds.push(tid);
+          }
+          continue;
+        }
+        if (EXCLUDED_PROCUREMENT_CATEGORIES.has(bid.procurementCategory)) { droppedExcluded++; processedIds.push(tid); continue; }
         const text = `${bid.lotName || ''} ${bid.lotDescription || ''}`;
-        if (isExcluded(text)) { droppedExcluded++; continue; }
+        if (isExcluded(text)) { droppedExcluded++; processedIds.push(tid); continue; }
 
         const matched = matchCategory(text);
         const category = matched || 'General';
@@ -716,6 +752,7 @@ async function scrapeEgp(cache) {
           sourcePortal: 'egp',
           postedAt: bid.invitationDate || bid.timestamp || null,
         });
+        processedIds.push(tid);
       }
     }
 
@@ -727,11 +764,10 @@ async function scrapeEgp(cache) {
     skip += pageBids;
   }
 
-  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} out-of-window; ${alreadyCached} already cached; ${processedIds.length} processed this run).`);
-  // processedIds includes every uncached bid we evaluated — runSource caches the
-  // ones we didn't push as tenders (skip-only entries) so they don't get
-  // re-walked every 30 min. Without this, EGP keeps scanning all ~12 pages
-  // forever because out-of-window/excluded bids never make it into cache.
+  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} permanent out-of-window; deferred ${deferredTooFar} too-far; ${alreadyCached} already cached; ${processedIds.length} processed this run).`);
+  // processedIds excludes too-far future bids. Those should be reconsidered as
+  // their deadlines approach; permanent drops are cached so EGP doesn't scan the
+  // same dead ends every run.
   return { tenders, processedIds };
 }
 
@@ -740,7 +776,7 @@ function filterTenders(tenders, cache) {
   // matching fingerprint — same name+entity+deadline_date posted on a
   // different portal or under a re-issued ID). Window/cost/status filters
   // are handled upstream in the scrapers, so this stays minimal.
-  const cachedIds = new Set(cache.tenders.map(t => t.tenderId));
+  const cachedIds = new Set(cache.tenders.filter(isCacheHitEntry).map(t => t.tenderId));
   const cachedFingerprints = new Set(cache.tenders.map(t => t.fingerprint).filter(Boolean));
 
   return tenders.filter(t => {
@@ -1006,7 +1042,7 @@ async function runSource({ key, label, scrape }) {
   // Caching them prevents the same dead-ends from re-running every 30 min.
   const tenderIdSet = new Set(tenders.map(t => t.tenderId));
   const skipOnlyIds = processedIds.filter(id => !tenderIdSet.has(id));
-  const skipOnlyEntries = skipOnlyIds.map(id => ({ tenderId: id, fingerprint: null }));
+  const skipOnlyEntries = skipOnlyIds.map(id => ({ tenderId: id, fingerprint: null, skipReason: 'permanent' }));
 
   const persistCache = (extras) => {
     saveCache(key, {
