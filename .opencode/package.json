@@ -2,6 +2,7 @@
   "name": "tender-hunter",
   "version": "1.0.0",
   "dependencies": {
+    "@kilocode/plugin": "7.2.22",
     "playwright": "^1.59.1"
   }
 }
