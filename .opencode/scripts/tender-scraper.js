@@ -951,21 +951,20 @@ function formatPostedAgo(isoTimestamp, now) {
 }
 
 function formatDigest(tenders, sourceLabel) {
+  const MAX_PER_MESSAGE = 10;
   const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  const header = sourceLabel ? `📋 ${sourceLabel.toUpperCase()} DIGEST — ${today}` : `📋 TENDER DIGEST — ${today}`;
+  const baseHeader = sourceLabel ? `📋 ${sourceLabel.toUpperCase()} DIGEST — ${today}` : `📋 TENDER DIGEST — ${today}`;
 
   if (tenders.length === 0) {
-    return `${header}
+    return [`${baseHeader}
 ━━━━━━━━━━━━━━━━━━━━
 
 No new tenders found today.
 
 ━━━━━━━━━━━━━━━━━━━━
-✅ Sent to TenderFlow`;
+✅ Sent to TenderFlow`];
   }
 
-  // Sort by NEWNESS — most recently posted first. Tenders without a postedAt
-  // timestamp fall to the end (we couldn't determine when they were posted).
   const now = new Date();
   const sortable = tenders.map(t => {
     const ms = t.postedAt ? new Date(t.postedAt).getTime() : NaN;
@@ -973,41 +972,40 @@ No new tenders found today.
   });
   sortable.sort((a, b) => {
     if (a.valid !== b.valid) return a.valid ? -1 : 1;
-    return b.ms - a.ms; // descending: newest first
+    return b.ms - a.ms;
   });
 
-  // Pack tenders dynamically — full titles, stop adding once we'd push past
-  // Telegram's 4096-char limit. Reserve ~200 chars for header + footer.
-  const TELEGRAM_LIMIT = 4096;
-  const FOOTER_RESERVE = 200;
+  const chunks = [];
+  for (let i = 0; i < sortable.length; i += MAX_PER_MESSAGE) {
+    const slice = sortable.slice(i, i + MAX_PER_MESSAGE);
+    const chunkIndex = Math.floor(i / MAX_PER_MESSAGE) + 1;
+    const totalChunks = Math.ceil(sortable.length / MAX_PER_MESSAGE);
+    const header = totalChunks > 1
+      ? `${baseHeader}${chunkIndex > 1 ? ` (continued ${chunkIndex}/${totalChunks})` : ''}`
+      : baseHeader;
 
-  let msg = `${header}\n`;
-  msg += `${tenders.length} new tender${tenders.length === 1 ? '' : 's'}`;
-  msg += `\n━━━━━━━━━━━━━━━━━━━━`;
+    let msg = `${header}\n`;
+    msg += `${sortable.length} new tender${sortable.length === 1 ? '' : 's'}\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━`;
 
-  let included = 0;
-  for (const { t } of sortable) {
-    const title = escapeTelegramMarkdown(t.title || 'Untitled');
-    let block = `\n\n▸ [${title}](${t.url})`;
-    if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
-      block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
+    for (const { t } of slice) {
+      const title = escapeTelegramMarkdown(t.title || 'Untitled');
+      let block = `\n\n▸ [${title}](${t.url})`;
+      if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
+        block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
+      }
+      const ago = formatPostedAgo(t.postedAt, now);
+      if (ago) {
+        block += `\n  Posted ${ago}`;
+      }
+      msg += block;
     }
-    const ago = formatPostedAgo(t.postedAt, now);
-    if (ago) {
-      block += `\n  Posted ${ago}`;
-    }
-    if (msg.length + block.length + FOOTER_RESERVE > TELEGRAM_LIMIT) break;
-    msg += block;
-    included++;
+
+    msg += `\n\n━━━━━━━━━━━━━━━━━━━━\n✅ Sent to TenderFlow`;
+    chunks.push(msg);
   }
 
-  const overflow = tenders.length - included;
-  msg += `\n\n━━━━━━━━━━━━━━━━━━━━`;
-  if (overflow > 0) {
-    msg += `\n+${overflow} more in dashboard`;
-  }
-  msg += `\n✅ Sent to TenderFlow`;
-  return msg;
+  return chunks;
 }
 
 async function sendToTelegram(message) {
@@ -1087,11 +1085,22 @@ async function runSource({ key, label, scrape }) {
     return { ok: true, sent: 0 };
   }
 
-  console.log(`${label}: sending to TenderFlow...`);
-  const tfResult = await sendToTenderFlow(filtered);
+  // TenderFlow DISABLED
+  // To re-enable: replace the two lines below with:
+  //   console.log(`${label}: sending to TenderFlow...`);
+  //   const tfResult = await sendToTenderFlow(filtered);
+  const tfResult = { success: true, created: 0, skipped: 0 };
+  console.log(`${label}: TenderFlow send disabled — skipping`);
 
   const msg = formatDigest(filtered, label);
-  const sent = await sendToTelegram(msg);
+  let sent = false;
+  if (Array.isArray(msg)) {
+    for (const chunk of msg) {
+      sent = await sendToTelegram(chunk);
+    }
+  } else {
+    sent = await sendToTelegram(msg);
+  }
 
   if (!tfResult.success && !sent) {
     console.error(`${label}: both TenderFlow and Telegram delivery failed`);
