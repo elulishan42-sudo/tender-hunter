@@ -63,7 +63,7 @@ const EXCLUDE_PATTERNS = [
   // mentioning the word (cleaning services, office services, etc.) even
   // when they were product procurements. Narrow to phrases that clearly
   // mean a service contract.
-  /\bprovision\s+of\s+(?:\w+\s+){0,3}services?\b/i,
+  /\bprovision\s+of\s+(?:\w+\s+){0,1}services?\b/i,
   /\bservice\s+(contract|provision|agreement)\b/i,
   /\b(audit|training|advisory|legal|financial|maintenance)\s+services?\b/i,
   /\boutsourc(ing|ed)\b/i,
@@ -337,7 +337,7 @@ async function scrapeListingPage(page, url) {
     const linksByTender = new Map();
     document.querySelectorAll('a[href*="/tenders/"]').forEach(a => {
       const href = a.href;
-      const match = href.match(/\/tenders\/([a-z0-9]+)(?:[/?#]|$)/);
+      const match = href.match(/\/tenders\/([A-Za-z0-9_-]+)(?:[/?#]|$)/);
       if (!match) return;
       const tenderId = match[1];
       // Skip non-tender paths like /tenders/popular or /tenders/recent
