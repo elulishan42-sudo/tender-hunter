@@ -14,7 +14,6 @@ on:
 # possible on slow days), cancel it rather than queue another.
 concurrency:
   group: tender-hunter
-  cancel-in-progress: true
 
 jobs:
   scrape:
