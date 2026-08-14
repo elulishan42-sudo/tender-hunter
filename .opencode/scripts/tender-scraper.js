@@ -962,7 +962,7 @@ function formatDigest(tenders, sourceLabel) {
 No new tenders found today.
 
 ━━━━━━━━━━━━━━━━━━━━
-✅ Sent to TenderFlow`];
+✅ Sent to Telegram`];
   }
 
   const now = new Date();
@@ -1001,7 +1001,7 @@ No new tenders found today.
       msg += block;
     }
 
-    msg += `\n\n━━━━━━━━━━━━━━━━━━━━\n✅ Sent to TenderFlow`;
+    msg += `\n\n━━━━━━━━━━━━━━━━━━━━\n✅ Sent to Telegram`;
     chunks.push(msg);
   }
 
@@ -1026,6 +1026,15 @@ async function sendToTelegram(message) {
     console.error('Telegram error:', result.description);
   } catch (e) { console.error('Fetch error:', e.message); }
   return false;
+}
+
+// Send an array of message chunks, returning true if at least one was delivered.
+async function sendChunks(chunks) {
+  let any = false;
+  for (const chunk of chunks) {
+    any = (await sendToTelegram(chunk)) || any;
+  }
+  return any;
 }
 
 // Combined run: both sources sequentially in one workflow invocation. Each
@@ -1068,10 +1077,15 @@ async function runSource({ key, label, scrape }) {
     });
   };
 
+  // On a manual run (FORCE_DIGEST), always emit a digest — even when there's
+  // nothing new — so a quiet day is distinguishable from a broken run.
+  const forceDigest = !!process.env.FORCE_DIGEST;
+
   if (tenders.length === 0) {
     // Still save the skip-only entries so we don't re-fetch the same dropped candidates.
     if (skipOnlyEntries.length > 0) persistCache([]);
     console.log(`${label}: nothing new to process${skipOnlyEntries.length ? ` (cached ${skipOnlyEntries.length} skip-only IDs)` : ''}`);
+    if (forceDigest) await sendChunks(formatDigest([], label));
     return { ok: true, sent: 0 };
   }
 
@@ -1082,6 +1096,7 @@ async function runSource({ key, label, scrape }) {
     // Tenders all matched a known fingerprint. Cache them so we don't re-fetch.
     const skipFp = tenders.map(t => ({ tenderId: t.tenderId, fingerprint: computeFingerprint(t) }));
     persistCache(skipFp);
+    if (forceDigest) await sendChunks(formatDigest([], label));
     return { ok: true, sent: 0 };
   }
 
@@ -1092,15 +1107,7 @@ async function runSource({ key, label, scrape }) {
   const tfResult = { success: true, created: 0, skipped: 0 };
   console.log(`${label}: TenderFlow send disabled — skipping`);
 
-  const msg = formatDigest(filtered, label);
-  let sent = false;
-  if (Array.isArray(msg)) {
-    for (const chunk of msg) {
-      sent = await sendToTelegram(chunk);
-    }
-  } else {
-    sent = await sendToTelegram(msg);
-  }
+  const sent = await sendChunks(formatDigest(filtered, label));
 
   if (!tfResult.success && !sent) {
     console.error(`${label}: both TenderFlow and Telegram delivery failed`);

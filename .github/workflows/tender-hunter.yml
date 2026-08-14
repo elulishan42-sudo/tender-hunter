@@ -10,8 +10,9 @@ on:
     - cron: '47 3-17 * * *'
   workflow_dispatch:
 
-# Skip overlapping runs — if a previous run is still going (unlikely, but
-# possible on slow days), cancel it rather than queue another.
+# Serialize runs so two overlapping schedules don't fight over the same cache
+# files. Without cancel-in-progress, a slow run is queued behind the current one
+# rather than cancelled.
 concurrency:
   group: tender-hunter
 
@@ -51,4 +52,16 @@ jobs:
           MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
           MERKATO_PASSWORD: ${{ secrets.MERKATO_PASSWORD }}
           TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
+          # Manual runs always emit a digest (even when nothing is new) so a
+          # quiet day is distinguishable from a broken run.
+          FORCE_DIGEST: ${{ github.event_name == 'workflow_dispatch' && 'true' || '' }}
         run: node .opencode/scripts/tender-scraper.js
+
+      # Alert when a run fails so outages (site change, login break, Telegram
+      # error, the 60-day auto-disable, etc.) don't go unnoticed.
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${{ secrets.TELEGRAM_USER_ID }}\",\"text\":\"⚠️ Tender Hunter run failed at $(date -u). Check the Actions log.\",\"parse_mode\":\"Markdown\"}"
