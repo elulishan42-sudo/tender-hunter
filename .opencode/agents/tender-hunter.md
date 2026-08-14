@@ -37,9 +37,12 @@ during Addis active hours: `7/27/47 3-17 * * *`).
    TenderFlow ingestion is currently **disabled** in code.
 
 ## Credentials
-- **2Merkato**: atlabtradingplc@gmail.com / lichom11
-- **Telegram**: bot token + chat ID are supplied via GitHub *secrets* (repo
-  settings → Secrets). Do not hardcode the bot token or chat ID in this file.
+All credentials are supplied via GitHub *secrets* (repo settings → Secrets) and
+are **not** stored in this repo:
+- **2Merkato**: `MERKATO_EMAIL` / `MERKATO_PASSWORD`
+- **Telegram**: `TELEGRAM_BOT_TOKEN` / `TELEGRAM_USER_ID`
+- **TenderFlow**: `TENDERFLOW_API_KEY`
+For local runs, put them in `.opencode/data/tender-config.json` (gitignored).
 
 ## Manual run / heartbeat
 The workflow supports `workflow_dispatch`. On a manual run the script sets
