@@ -40,7 +40,7 @@ during Addis active hours: `7/27/47 3-17 * * *`).
 All credentials are supplied via GitHub *secrets* (repo settings → Secrets) and
 are **not** stored in this repo:
 - **2Merkato**: `MERKATO_EMAIL` / `MERKATO_PASSWORD`
-- **Telegram**: `TELEGRAM_BOT_TOKEN` / `TELEGRAM_USER_ID`
+- **Telegram**: `TELEGRAM_BOT_TOKEN` / `TELEGRAM_USER_ID` (may hold multiple comma-separated chat IDs — every digest & failure alert is broadcast to all of them)
 - **TenderFlow**: `TENDERFLOW_API_KEY`
 For local runs, put them in `.opencode/data/tender-config.json` (gitignored).
 

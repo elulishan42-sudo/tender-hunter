@@ -61,7 +61,13 @@ jobs:
       # error, the 60-day auto-disable, etc.) don't go unnoticed.
       - name: Notify on failure
         if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          IDS: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\":\"${{ secrets.TELEGRAM_USER_ID }}\",\"text\":\"⚠️ Tender Hunter run failed at $(date -u). Check the Actions log.\",\"parse_mode\":\"Markdown\"}"
+          IFS=',' read -ra ARR <<< "$IDS"
+          for id in "${ARR[@]}"; do
+            curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"$id\",\"text\":\"⚠️ Tender Hunter run failed at $(date -u). Check the Actions log.\",\"parse_mode\":\"Markdown\"}"
+          done

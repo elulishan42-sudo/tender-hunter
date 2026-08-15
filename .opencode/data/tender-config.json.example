@@ -1,7 +1,8 @@
 {
   "telegram": {
     "botToken": "YOUR_TELEGRAM_BOT_TOKEN",
-    "userId": "YOUR_TELEGRAM_USER_ID"
+    "userId": "YOUR_TELEGRAM_USER_ID  (single ID OR comma/space-separated list)",
+    "userIds": ["id1", "id2"]
   },
   "merkato": {
     "email": "your@email.com",

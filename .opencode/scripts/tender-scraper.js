@@ -98,7 +98,7 @@ function deadlineWindowStatus(deadlineLike, now) {
 }
 
 let config = {
-  telegram: { botToken: '', userId: '' },
+  telegram: { botToken: '', userIds: [] },
   merkato: { email: '', password: '' },
 };
 
@@ -118,11 +118,18 @@ function deepMerge(target, source) {
   return result;
 }
 
+// Accepts id1, id2 / id1 id2 / [id1,id2] -> trimmed, deduped array.
+function parseUserIds(raw) {
+  if (Array.isArray(raw)) return [...new Set(raw.map(x => String(x).trim()).filter(Boolean))];
+  if (!raw) return [];
+  return [...new Set(String(raw).split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))];
+}
+
 function loadConfig() {
   // Check environment variables first (for GitHub Actions)
   if (process.env.TELEGRAM_BOT_TOKEN) {
     config.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
-    config.telegram.userId = process.env.TELEGRAM_USER_ID || '';
+    config.telegram.userIds = parseUserIds(process.env.TELEGRAM_USER_ID);
     config.merkato.email = process.env.MERKATO_EMAIL || '';
     config.merkato.password = process.env.MERKATO_PASSWORD || '';
     return DEFAULT_FILTERS;
@@ -133,6 +140,9 @@ function loadConfig() {
     if (fs.existsSync(CONFIG_FILE)) {
       const loaded = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
       config = deepMerge(config, loaded);
+      config.telegram = config.telegram || {};
+      config.telegram.userIds = parseUserIds(config.telegram.userIds && config.telegram.userIds.length
+        ? config.telegram.userIds : config.telegram.userId);
       return config.filters || DEFAULT_FILTERS;
     }
   } catch (e) { console.error('Config error:', e.message); }
@@ -1009,23 +1019,25 @@ No new tenders found today.
 }
 
 async function sendToTelegram(message) {
-  if (!config.telegram.botToken || !config.telegram.userId) {
+  if (!config.telegram.botToken || !config.telegram.userIds.length) {
     console.log('Telegram not configured');
     console.log(message.substring(0, 500));
     return false;
   }
-
-  try {
-    const res = await fetchWithRetry(`https://api.telegram.org/bot${config.telegram.botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: config.telegram.userId, text: message, parse_mode: 'Markdown' })
-    });
-    const result = await res.json();
-    if (result.ok) { console.log('✅ Sent to Telegram!'); return true; }
-    console.error('Telegram error:', result.description);
-  } catch (e) { console.error('Fetch error:', e.message); }
-  return false;
+  let any = false;
+  for (const chatId of config.telegram.userIds) {
+    try {
+      const res = await fetchWithRetry(`https://api.telegram.org/bot${config.telegram.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'Markdown' })
+      });
+      const result = await res.json();
+      if (result.ok) { console.log(`Sent to Telegram (chat ${chatId})`); any = true; }
+      else console.error(`Telegram error (chat ${chatId}):`, result.description);
+    } catch (e) { console.error(`Fetch error (chat ${chatId}):`, e.message); }
+  }
+  return any;
 }
 
 // Send an array of message chunks, returning true if at least one was delivered.
