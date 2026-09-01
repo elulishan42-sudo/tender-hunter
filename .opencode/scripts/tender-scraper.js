@@ -757,14 +757,11 @@ async function scrapeEgp(cache) {
 
         const deadline = new Date(bid.submissionDeadline);
         const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
-        const refForHash = (bid.lotReferenceNo || bid.procurementReferenceNo || bid.id).trim();
-        // encodeURIComponent leaves parens unescaped, which breaks Telegram
-        // markdown link syntax [title](url). Force-escape them.
-        const hashRef = encodeURIComponent(refForHash).replace(/\(/g, '%28').replace(/\)/g, '%29');
-        // This workflow only handles tendering ("bid") — detail pages require
-        // auth, so link to the listing page with the lot reference as a hash
-        // (the user can search by it there).
-        const sourceLink = `https://production.egp.gov.et/egp/bids/all#${hashRef}`;
+        // Tender ("bid") detail pages are public — link straight to the bid
+        // detail page using the internal bid.id. This mirrors the purchasing
+        // ("proforma") route shape (/<module>/<id>/open); the purchasing fix
+        // established that the front-end /open route keys on id, not sourceId.
+        const sourceLink = `https://production.egp.gov.et/egp/bids/all/tendering/${bid.id}/open`;
 
         tenders.push({
           tenderId: tid,
@@ -1039,9 +1036,9 @@ No new tenders found today.
         block += `\n  Posted ${ago}`;
       }
 
-      // EGP links go to a list page, so show the lot reference prominently so
-      // the user can search for it once they land on the list.
-      if (t.sourcePortal === 'egp' && t.tenderNumber) {
+        // EGP links now go straight to the detail page, but showing the lot
+        // reference is still handy for cross-referencing or quoting.
+        if (t.sourcePortal === 'egp' && t.tenderNumber) {
         block += `\n  Ref: ${escapeTelegramMarkdown(t.tenderNumber)}`;
       }
 
