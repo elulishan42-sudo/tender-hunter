@@ -1014,9 +1014,9 @@ No new tenders found today.
         block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
       }
 
-      // Category + deadline on one line so the user can filter and prioritize
-      // at a glance. days-until is computed at send time (more accurate than
-      // daysLeft, which is frozen at scrape time).
+      // Deadline line. days-until is computed at send time (more accurate
+      // than the daysLeft frozen at scrape time). Labels: Closes today /
+      // Closes tomorrow / Closes in N days / Deadline passed / Closes: —.
       const days = daysUntilClose(t.deadline, now);
       const dateLabel = t.deadline
         ? new Date(t.deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -1027,9 +1027,8 @@ No new tenders found today.
           : days === 0 ? 'Closes today'
           : days === 1 ? 'Closes tomorrow'
           : `Closes in ${days} days`;
-      const cat = escapeTelegramMarkdown(t.category || 'General');
       const closePart = dateLabel ? `${closeLabel} (${dateLabel})` : closeLabel;
-      block += `\n  Category: ${cat} · ${closePart}`;
+      block += `\n  ${closePart}`;
 
       const ago = formatPostedAgo(t.postedAt, now);
       if (ago) {
