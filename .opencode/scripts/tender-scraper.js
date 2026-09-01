@@ -964,6 +964,14 @@ function formatPostedAgo(isoTimestamp, now) {
   return null;
 }
 
+// Days until a deadline, computed at call time. Returns null if unparseable.
+function daysUntilClose(deadlineLike, now) {
+  if (!deadlineLike) return null;
+  const d = new Date(deadlineLike);
+  if (isNaN(d)) return null;
+  return Math.ceil((d - now) / (1000 * 60 * 60 * 24));
+}
+
 function formatDigest(tenders, sourceLabel) {
   const MAX_PER_MESSAGE = 10;
   const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -1008,10 +1016,35 @@ No new tenders found today.
       if (t.publishingEntity && t.publishingEntity !== 'Unknown') {
         block += `\n  ${escapeTelegramMarkdown(t.publishingEntity)}`;
       }
+
+      // Category + deadline on one line so the user can filter and prioritize
+      // at a glance. days-until is computed at send time (more accurate than
+      // daysLeft, which is frozen at scrape time).
+      const days = daysUntilClose(t.deadline, now);
+      const dateLabel = t.deadline
+        ? new Date(t.deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : null;
+      const closeLabel =
+        days == null ? 'Closes: —'
+          : days < 0 ? 'Deadline passed'
+          : days === 0 ? 'Closes today'
+          : days === 1 ? 'Closes tomorrow'
+          : `Closes in ${days} days`;
+      const cat = escapeTelegramMarkdown(t.category || 'General');
+      const closePart = dateLabel ? `${closeLabel} (${dateLabel})` : closeLabel;
+      block += `\n  Category: ${cat} · ${closePart}`;
+
       const ago = formatPostedAgo(t.postedAt, now);
       if (ago) {
         block += `\n  Posted ${ago}`;
       }
+
+      // EGP links go to a list page, so show the lot reference prominently so
+      // the user can search for it once they land on the list.
+      if (t.sourcePortal === 'egp' && t.tenderNumber) {
+        block += `\n  Ref: ${escapeTelegramMarkdown(t.tenderNumber)}`;
+      }
+
       msg += block;
     }
 
