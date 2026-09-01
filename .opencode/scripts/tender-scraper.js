@@ -5,7 +5,6 @@
  * 2. Telegram (for daily digest)
  */
 
-const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -523,6 +522,7 @@ async function scrapeMerkato(cache) {
   const MAX_TOTAL = 100;            // cold-start cap — captures most-recent N. Real-time use
                                     // case: new posts arrive every 30 min, not bulk backfill.
                                     // Each subsequent run picks up new posts within the cache window.
+  const { chromium } = require('playwright');
   const DETAIL_CONCURRENCY = 10;
   const cachedIds = new Set((cache?.tenders || []).filter(isCacheHitEntry).map(t => t.tenderId));
 
@@ -687,7 +687,7 @@ async function scrapeEgp(cache) {
   const now = new Date();
   const tenders = [];
   const processedIds = [];   // accepted or permanently dropped bids that are safe to cache
-  let droppedOutOfWindow = 0, deferredTooFar = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
+  let droppedOutOfWindow = 0, droppedNonTendering = 0, deferredTooFar = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
   let pages = 0, skip = 0;
   let stoppedReason = `MAX_PAGES (${MAX_PAGES})`;
 
@@ -721,6 +721,9 @@ async function scrapeEgp(cache) {
         if (cachedIds.has(tid)) { alreadyCached++; continue; }
         newOnPage++; // counts ALL uncached bids (even ones we'll drop) so early-termination signal isn't masked
 
+        const sourceApp = (bid.sourceApplication || '').toLowerCase();
+        if (sourceApp !== 'tendering') { droppedNonTendering++; processedIds.push(tid); continue; }
+
         const deadlineStatus = deadlineWindowStatus(bid.submissionDeadline, now);
         if (deadlineStatus !== 'in-window') {
           if (deadlineStatus === 'too-far') {
@@ -743,24 +746,14 @@ async function scrapeEgp(cache) {
 
         const deadline = new Date(bid.submissionDeadline);
         const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
-        const sourceApp = (bid.sourceApplication || 'purchasing').toLowerCase();
-        // Purchasing bids load via /purchasing-quotation-invitations/api/get-quotation-invitation,
-        // which is public and accepts bid.sourceId (NOT bid.id — that returns 204 No Content).
-        // Tendering / Auctioning / Prequalification all require auth, so we link to the
-        // listing page where users can search by the tender_number we already include.
-        const urlId = bid.sourceId || bid.id;
         const refForHash = (bid.lotReferenceNo || bid.procurementReferenceNo || bid.id).trim();
         // encodeURIComponent leaves parens unescaped, which breaks Telegram
         // markdown link syntax [title](url). Force-escape them.
         const hashRef = encodeURIComponent(refForHash).replace(/\(/g, '%28').replace(/\)/g, '%29');
-        const sourceLink = sourceApp === 'purchasing'
-          ? `https://production.egp.gov.et/egp/bids/all/${sourceApp}/${urlId}/open`
-          // Non-Purchasing detail pages require auth and hang for most users.
-          // Land on the listing page with the reference as a hash fragment so
-          // each tender has a UNIQUE source_link (avoids TenderFlow's
-          // duplicate_source_link rejection) and the user can search by the
-          // reference visible in the digest.
-          : `https://production.egp.gov.et/egp/bids/all#${hashRef}`;
+        // This workflow only handles tendering ("bid") — detail pages require
+        // auth, so link to the listing page with the lot reference as a hash
+        // (the user can search by it there).
+        const sourceLink = `https://production.egp.gov.et/egp/bids/all#${hashRef}`;
 
         tenders.push({
           tenderId: tid,
@@ -790,7 +783,7 @@ async function scrapeEgp(cache) {
     skip += pageBids;
   }
 
-  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedExcluded} excluded, ${droppedOutOfWindow} permanent out-of-window; deferred ${deferredTooFar} too-far; ${alreadyCached} already cached; ${processedIds.length} processed this run).`);
+  console.log(`  EGP done — ${stoppedReason}. ${tenders.length} accepted (${mappedToGeneral} as General; dropped ${droppedNonTendering} non-tendering, ${droppedExcluded} excluded, ${droppedOutOfWindow} permanent out-of-window; deferred ${deferredTooFar} too-far; ${alreadyCached} already cached; ${processedIds.length} processed this run).`);
   // processedIds excludes too-far future bids. Those should be reconsidered as
   // their deadlines approach; permanent drops are cached so EGP doesn't scan the
   // same dead ends every run.
@@ -1132,12 +1125,23 @@ async function runSource({ key, label, scrape }) {
 }
 
 async function main() {
-  console.log(`=== Tender Hunter — combined run @ ${new Date().toISOString()} ===`);
+  console.log(`=== Tender Hunter run @ ${new Date().toISOString()} ===`);
   loadConfig();
+
+  // Each workflow runs a single source (RUN_SOURCE=merkato or egp). Unset = run
+  // all (legacy combined mode).
+  const sources = process.env.RUN_SOURCE
+    ? SOURCES.filter(s => s.key === process.env.RUN_SOURCE)
+    : SOURCES;
+  if (sources.length === 0) {
+    console.error(`No source matched RUN_SOURCE=${process.env.RUN_SOURCE}`);
+    return false;
+  }
+  console.log(`Sources: ${sources.map(s => s.label).join(', ')}`);
 
   let anyOk = false;
   let totalSent = 0;
-  for (const source of SOURCES) {
+  for (const source of sources) {
     const result = await runSource(source);
     if (result.ok) {
       anyOk = true;
@@ -1145,7 +1149,7 @@ async function main() {
     }
   }
 
-  console.log(`\n=== Run complete: ${totalSent} new tender(s) sent across all sources ===`);
+  console.log(`\n=== Run complete: ${totalSent} new tender(s) sent ===`);
   return anyOk;
 }
 

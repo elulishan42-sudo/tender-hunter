@@ -1,4 +1,4 @@
-name: Tender Hunter
+name: Tender Hunter — EGP (Bid)
 on:
   schedule:
     # Active hours only — sources don't post new tenders after 7pm Addis
@@ -15,7 +15,7 @@ on:
 # Runs are short and incremental, so a cancelled run loses little; the next
 # run picks up the same tenders via the cache.
 concurrency:
-  group: tender-hunter
+  group: tender-hunter-egp
   cancel-in-progress: true
 
 jobs:
@@ -29,47 +29,45 @@ jobs:
         with:
           node-version: 20
 
-      - name: Restore tender caches
+      - name: Restore EGP cache
         uses: actions/cache@v4
         with:
-          path: |
-            .opencode/data/tender-cache-merkato.json
-            .opencode/data/tender-cache-egp.json
-          # Unique key per run so we always save a fresh snapshot; restore-keys
-          # pulls the latest matching prefix from a previous run.
-          key: tender-cache-${{ github.run_id }}
+          path: .opencode/data/tender-cache-egp.json
+          # Unique key per run; restore-keys pulls the latest matching prefix.
+          key: tender-cache-egp-${{ github.run_id }}
           restore-keys: |
-            tender-cache-
+            tender-cache-egp-
 
       - name: Install dependencies
         run: cd .opencode && npm ci
 
-      - name: Install Playwright browsers
-        run: cd .opencode && npx playwright install chromium --with-deps
+      # No Playwright/browser install: the EGP workflow uses a public JSON API,
+      # not a browser. Skipping this step saves ~1-2 min per run. The playwright
+      # npm package is still installed by `npm ci` but never required (the
+      # scraper loads it lazily inside scrapeMerkato only).
 
-      - name: Run scraper
+      - name: Run EGP scraper (tendering / bid only)
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
-          MERKATO_EMAIL: ${{ secrets.MERKATO_EMAIL }}
-          MERKATO_PASSWORD: ${{ secrets.MERKATO_PASSWORD }}
+          RUN_SOURCE: egp
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_EGP }}
+          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID_EGP }}
           TENDERFLOW_API_KEY: ${{ secrets.TENDERFLOW_API_KEY }}
           # Manual runs always emit a digest (even when nothing is new) so a
           # quiet day is distinguishable from a broken run.
           FORCE_DIGEST: ${{ github.event_name == 'workflow_dispatch' && 'true' || '' }}
         run: node .opencode/scripts/tender-scraper.js
 
-      # Alert when a run fails so outages (site change, login break, Telegram
-      # error, the 60-day auto-disable, etc.) don't go unnoticed.
+      # Alert when a run fails so outages (API change, Telegram error, the
+      # 60-day auto-disable, etc.) don't go unnoticed. Uses the second bot.
       - name: Notify on failure
         if: failure()
         env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          IDS: ${{ secrets.TELEGRAM_USER_ID }}
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_EGP }}
+          IDS: ${{ secrets.TELEGRAM_USER_ID_EGP }}
         run: |
           IFS=',' read -ra ARR <<< "$IDS"
           for id in "${ARR[@]}"; do
             curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"$id\",\"text\":\"⚠️ Tender Hunter run failed at $(date -u). Check the Actions log.\",\"parse_mode\":\"Markdown\"}"
+              -d "{\"chat_id\":\"$id\",\"text\":\"⚠️ Tender Hunter (EGP bid) run failed at $(date -u). Check the Actions log.\",\"parse_mode\":\"Markdown\"}"
           done
