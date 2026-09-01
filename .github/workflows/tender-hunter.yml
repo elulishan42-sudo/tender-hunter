@@ -3,18 +3,20 @@ on:
   schedule:
     # Active hours only — sources don't post new tenders after 7pm Addis
     # (UTC+3). 03:00-17:00 UTC ≈ 06:00-20:00 Addis (with 1h buffer past 7pm
-    # for late stragglers). Three runs per hour at off-peak minutes
-    # (avoiding GitHub's high-load 0/15/30/45 slots).
+    # for late stragglers). Two runs per hour, every 30 minutes, at off-peak
+    # minutes (avoiding GitHub's high-load 0/15/30/45 slots).
     - cron: '7 3-17 * * *'
-    - cron: '27 3-17 * * *'
-    - cron: '47 3-17 * * *'
+    - cron: '37 3-17 * * *'
   workflow_dispatch:
 
-# Serialize runs so two overlapping schedules don't fight over the same cache
-# files. Without cancel-in-progress, a slow run is queued behind the current one
-# rather than cancelled.
+# If a run is still in progress when the next one is scheduled, cancel it.
+# This prevents the queue-backlog bursts (clusters of runs close together
+# followed by long gaps) that GitHub's delayed scheduling otherwise causes.
+# Runs are short and incremental, so a cancelled run loses little; the next
+# run picks up the same tenders via the cache.
 concurrency:
   group: tender-hunter
+  cancel-in-progress: true
 
 jobs:
   scrape:
