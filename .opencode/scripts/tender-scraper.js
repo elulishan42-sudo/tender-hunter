@@ -668,7 +668,7 @@ async function scrapeMerkato(cache) {
 
     await Promise.all([listingPage, ...detailPages].map(p => p.close().catch(() => {})));
 
-    return { tenders, processedIds };
+  return { tenders, processedIds };
   } finally {
     await browser.close();
   }
@@ -688,6 +688,7 @@ async function scrapeEgp(cache) {
   const tenders = [];
   const processedIds = [];   // accepted or permanently dropped bids that are safe to cache
   let droppedOutOfWindow = 0, droppedNonTendering = 0, deferredTooFar = 0, droppedExcluded = 0, mappedToGeneral = 0, alreadyCached = 0;
+  let maintenanceDetected = false;
   let pages = 0, skip = 0;
   let stoppedReason = `MAX_PAGES (${MAX_PAGES})`;
 
@@ -698,12 +699,22 @@ async function scrapeEgp(cache) {
       const res = await fetchWithRetry(url, {
         headers: { 'User-Agent': EGP_USER_AGENT, 'Accept': 'application/json' },
       });
-      if (!res.ok) {
-        console.log(`  EGP page ${pages + 1} failed: HTTP ${res.status}`);
-        stoppedReason = `HTTP ${res.status}`;
-        break;
-      }
-      data = await res.json();
+        if (!res.ok) {
+          console.log(`  EGP page ${pages + 1} failed: HTTP ${res.status}`);
+          stoppedReason = `HTTP ${res.status}`;
+          break;
+        }
+        // eGP returns its "system under maintenance" page as HTTP 200 with a
+        // non-JSON body (text/html). Detect that explicitly so runSource can
+        // fire a single one-time alert instead of producing silent runs.
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType && !contentType.includes('application/json')) {
+          console.log(`  EGP page ${pages + 1}: non-JSON response (${contentType}) — likely maintenance`);
+          maintenanceDetected = true;
+          stoppedReason = 'eGP maintenance';
+          break;
+        }
+        data = await res.json();
     } catch (e) {
       console.log(`  EGP page ${pages + 1} error: ${e.message}`);
       stoppedReason = 'fetch error';
@@ -787,7 +798,7 @@ async function scrapeEgp(cache) {
   // processedIds excludes too-far future bids. Those should be reconsidered as
   // their deadlines approach; permanent drops are cached so EGP doesn't scan the
   // same dead ends every run.
-  return { tenders, processedIds };
+  return { tenders, processedIds, maintenanceDetected };
 }
 
 function filterTenders(tenders, cache) {
@@ -1064,6 +1075,40 @@ async function runSource({ key, label, scrape }) {
 
   const tenders = result.tenders || [];
   const processedIds = result.processedIds || [];
+  const maintenanceDetected = result.maintenanceDetected === true;
+
+  // --- eGP maintenance handling ---
+  // When eGP returns its maintenance page (HTTP 200, non-JSON content-type),
+  // scrapeEgp sets maintenanceDetected. Send a single Telegram alert per
+  // outage (tracked via the cache's maintenanceAlerted flag) so the user
+  // knows the EGP digest is paused, then stay silent until the outage ends.
+  if (maintenanceDetected) {
+    if (!cache.maintenanceAlerted) {
+      await sendToTelegram(
+        `⚠️ eGP portal is under maintenance. The Tender Hunter (EGP bid) digest is paused and will resume automatically when the portal is back.`
+      );
+      console.log(`${label}: eGP maintenance detected — sent one-time alert`);
+    } else {
+      console.log(`${label}: eGP still under maintenance (alert already sent)`);
+    }
+    cache.maintenanceAlerted = true;
+    saveCache(key, {
+      tenders: cache.tenders,
+      lastRun: new Date().toISOString(),
+      maintenanceAlerted: cache.maintenanceAlerted || undefined,
+    });
+    return { ok: true, sent: 0 };
+  }
+  // Outage ended — clear the flag and persist so a future outage re-alerts.
+  if (cache.maintenanceAlerted) {
+    cache.maintenanceAlerted = false;
+    saveCache(key, {
+      tenders: cache.tenders,
+      lastRun: new Date().toISOString(),
+      maintenanceAlerted: cache.maintenanceAlerted || undefined,
+    });
+    console.log(`${label}: eGP is back — cleared maintenance flag`);
+  }
 
   // Build the set of tenderIds we should add to cache as "skip-only" — those we
   // detail-fetched (or otherwise paid the cost on) but did not push as tenders.
@@ -1079,6 +1124,7 @@ async function runSource({ key, label, scrape }) {
       // "new" days later. ~1 MB per source — still trivial.
       tenders: [...cache.tenders, ...skipOnlyEntries, ...extras].slice(-10000),
       lastRun: new Date().toISOString(),
+      maintenanceAlerted: cache.maintenanceAlerted || undefined,
     });
   };
 
