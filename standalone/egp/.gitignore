@@ -1,0 +1,7 @@
+node_modules/
+data/*.json
+!data/*.json.example
+.env
+.env.*
+!.env.example
+*.log

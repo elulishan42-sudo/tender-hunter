@@ -1,0 +1,11 @@
+{
+  "name": "tender-hunter-egp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Ethiopian EGP bid scraper and Telegram digest",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node scripts/tender-scraper.js",
+    "test": "node --test"
+  }
+}
